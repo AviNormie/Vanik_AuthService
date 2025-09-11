@@ -1,0 +1,275 @@
+{
+  "info": {
+    "name": "Auth Service API - SIH Project",
+    "description": "Complete API collection for testing Auth Service endpoints with OTP verification, JWT tokens, and SMS functionality",
+    "version": "1.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "mobile",
+      "value": "6350194264",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Send WhatsApp OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/send-whatsapp-otp",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "send-whatsapp-otp"]
+        },
+        "description": "Send OTP via WhatsApp to the specified mobile number"
+      },
+      "response": []
+    },
+    {
+      "name": "2. Send SMS OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/send-sms-otp",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "send-sms-otp"]
+        },
+        "description": "Send OTP via SMS to the specified mobile number"
+      },
+      "response": []
+    },
+    {
+      "name": "3. Verify OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\",\n  \"otp\": \"123456\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/verify-otp",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "verify-otp"]
+        },
+        "description": "Verify the OTP and get JWT token",
+        "event": [
+          {
+            "listen": "test",
+            "script": {
+              "exec": [
+                "if (pm.response.code === 200) {",
+                "    const response = pm.response.json();",
+                "    if (response.token) {",
+                "        pm.collectionVariables.set('jwt_token', response.token);",
+                "        console.log('JWT token saved:', response.token);",
+                "    }",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }
+        ]
+      },
+      "response": []
+    },
+    {
+      "name": "4. Resend WhatsApp OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/resend-whatsapp-otp",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "resend-whatsapp-otp"]
+        },
+        "description": "Resend OTP via WhatsApp"
+      },
+      "response": []
+    },
+    {
+      "name": "5. Resend SMS OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/resend-sms-otp",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "resend-sms-otp"]
+        },
+        "description": "Resend OTP via SMS"
+      },
+      "response": []
+    },
+    {
+      "name": "6. Verify JWT Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{jwt_token}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/verify-token",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "verify-token"]
+        },
+        "description": "Verify JWT token validity (for microservices)"
+      },
+      "response": []
+    },
+    {
+      "name": "7. Get User Profile",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{jwt_token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/auth/profile",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "profile"]
+        },
+        "description": "Get authenticated user profile"
+      },
+      "response": []
+    },
+    {
+      "name": "8. Get OTP Status (Debug)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/auth/otp-status/{{mobile}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "otp-status", "{{mobile}}"]
+        },
+        "description": "Get current OTP status for debugging (remove in production)"
+      },
+      "response": []
+    },
+    {
+      "name": "9. Send Custom SMS",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mobile\": \"{{mobile}}\",\n  \"message\": \"🌾 Weather Alert: Heavy rainfall expected in your area. Please take necessary precautions for your crops.\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/send-sms",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "send-sms"]
+        },
+        "description": "Send custom SMS (for crop alerts, weather warnings, etc.)"
+      },
+      "response": []
+    },
+    {
+      "name": "10. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/auth/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "health"]
+        },
+        "description": "Check service health status"
+      },
+      "response": []
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "console.log('🚀 Testing Auth Service API');",
+          "console.log('Base URL:', pm.collectionVariables.get('baseUrl'));",
+          "console.log('Mobile:', pm.collectionVariables.get('mobile'));"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "console.log('✅ Response Status:', pm.response.code);",
+          "console.log('📝 Response Body:', pm.response.text());"
+        ]
+      }
+    }
+  ]
+}
