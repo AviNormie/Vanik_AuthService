@@ -1,4 +1,265 @@
-import { Injectable } from '@nestjs/common';
+// src/auth/auth.service.ts
+import { Injectable, HttpException, HttpStatus, Inject } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
+import { FirebaseService } from '../firebase/firebase.service'; // Fixed import
+import { Farmer } from '../farmers/entities/farmer.entity';
+import { CompleteProfileDto } from './dto/auth.dto';
 
 @Injectable()
-export class AuthService {}
+export class AuthService {
+  constructor(
+    private firebaseService: FirebaseService, // Fixed service name
+    @InjectRepository(Farmer)
+    private farmerRepository: Repository<Farmer>,
+    @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+  ) {}
+
+  // Verify Firebase ID token and handle user creation/update
+  async verifyFirebaseToken(idToken: string) {
+    try {
+      this.logger.info('Starting token verification process', {
+        context: 'AuthService',
+        method: 'verifyFirebaseToken',
+      });
+
+      const decodedToken = await this.firebaseService.verifyIdToken(idToken);
+      
+      // Find or create farmer
+      let farmer = await this.farmerRepository.findOne({
+        where: { firebaseUid: decodedToken.uid }
+      });
+
+      if (!farmer && decodedToken.phone_number) {
+        // Create new farmer profile
+        farmer = this.farmerRepository.create({
+          firebaseUid: decodedToken.uid,
+          phoneNumber: decodedToken.phone_number,
+          lastLoginAt: new Date(),
+        });
+        farmer = await this.farmerRepository.save(farmer);
+        
+        this.logger.info('New farmer created', {
+          context: 'AuthService',
+          firebaseUid: decodedToken.uid,
+          phoneNumber: decodedToken.phone_number,
+        });
+      } else if (farmer) {
+        // Update last login
+        farmer.lastLoginAt = new Date();
+        await this.farmerRepository.save(farmer);
+        
+        this.logger.info('Existing farmer login updated', {
+          context: 'AuthService',
+          firebaseUid: decodedToken.uid,
+          phoneNumber: decodedToken.phone_number,
+        });
+      }
+
+      return {
+        success: true,
+        message: 'Authentication successful',
+        user: {
+          uid: decodedToken.uid,
+          phone: decodedToken.phone_number,
+          email: decodedToken.email,
+          verified: decodedToken.phone_number_verified || decodedToken.email_verified,
+          hasProfile: !!farmer?.name,
+        },
+        farmer: farmer ? {
+          firebaseUid: farmer.firebaseUid,
+          phoneNumber: farmer.phoneNumber,
+          name: farmer.name,
+          village: farmer.village,
+          district: farmer.district,
+          cropTypes: farmer.cropTypes ? JSON.parse(farmer.cropTypes) : [],
+          farmSize: farmer.farmSize,
+          language: farmer.language,
+        } : null,
+      };
+    } catch (error) {
+      this.logger.error('Token verification failed', {
+        context: 'AuthService',
+        method: 'verifyFirebaseToken',
+        error: error.message,
+      });
+      
+      throw new HttpException(
+        `Authentication failed: ${error.message}`,
+        HttpStatus.UNAUTHORIZED
+      );
+    }
+  }
+
+  // Complete farmer profile
+  async completeProfile(firebaseUid: string, profileData: CompleteProfileDto) {
+    try {
+      this.logger.info('Starting profile completion', {
+        context: 'AuthService',
+        method: 'completeProfile',
+        firebaseUid,
+        village: profileData.village,
+      });
+
+      const farmer = await this.farmerRepository.findOne({
+        where: { firebaseUid }
+      });
+
+      if (!farmer) {
+        this.logger.error('Farmer not found for profile completion', {
+          context: 'AuthService',
+          firebaseUid,
+        });
+        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
+      }
+
+      // Update farmer profile
+      farmer.name = profileData.name;
+      farmer.village = profileData.village ?? farmer.village;
+      farmer.district = profileData.district ?? farmer.district;
+      farmer.state = profileData.state ?? farmer.state;
+      farmer.cropTypes = profileData.cropTypes ? JSON.stringify(profileData.cropTypes) : farmer.cropTypes;
+      farmer.farmSize = profileData.farmSize ?? farmer.farmSize;
+      farmer.language = profileData.language || 'hindi';
+
+      const updatedFarmer = await this.farmerRepository.save(farmer);
+
+      // Update Firebase custom claims
+      await this.firebaseService.setCustomUserClaims(firebaseUid, {
+        hasProfile: true,
+        farmerType: 'registered',
+        village: profileData.village,
+        language: profileData.language || 'hindi',
+      });
+
+      this.logger.info('Profile completed successfully', {
+        context: 'AuthService',
+        firebaseUid,
+        name: profileData.name,
+        village: profileData.village,
+      });
+
+      return {
+        success: true,
+        message: 'Profile completed successfully',
+        farmer: {
+          firebaseUid: updatedFarmer.firebaseUid,
+          phoneNumber: updatedFarmer.phoneNumber,
+          name: updatedFarmer.name,
+          village: updatedFarmer.village,
+          district: updatedFarmer.district,
+          state: updatedFarmer.state,
+          cropTypes: updatedFarmer.cropTypes ? JSON.parse(updatedFarmer.cropTypes) : [],
+          farmSize: updatedFarmer.farmSize,
+          language: updatedFarmer.language,
+        }
+      };
+    } catch (error) {
+      this.logger.error('Profile completion failed', {
+        context: 'AuthService',
+        method: 'completeProfile',
+        firebaseUid,
+        error: error.message,
+      });
+      
+      throw new HttpException(
+        `Profile update failed: ${error.message}`,
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
+  // Get farmer profile
+  async getFarmerProfile(firebaseUid: string) {
+    try {
+      this.logger.info('Fetching farmer profile', {
+        context: 'AuthService',
+        method: 'getFarmerProfile',
+        firebaseUid,
+      });
+
+      const farmer = await this.farmerRepository.findOne({
+        where: { firebaseUid }
+      });
+
+      if (!farmer) {
+        this.logger.error('Farmer profile not found', {
+          context: 'AuthService',
+          firebaseUid,
+        });
+        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
+      }
+
+      return {
+        success: true,
+        farmer: {
+          firebaseUid: farmer.firebaseUid,
+          phoneNumber: farmer.phoneNumber,
+          name: farmer.name,
+          village: farmer.village,
+          district: farmer.district,
+          state: farmer.state,
+          cropTypes: farmer.cropTypes ? JSON.parse(farmer.cropTypes) : [],
+          farmSize: farmer.farmSize,
+          language: farmer.language,
+          lastLoginAt: farmer.lastLoginAt,
+          createdAt: farmer.createdAt,
+        }
+      };
+    } catch (error) {
+      this.logger.error('Failed to fetch farmer profile', {
+        context: 'AuthService',
+        method: 'getFarmerProfile',
+        firebaseUid,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  // Generate custom JWT for internal services (optional)
+  async generateInternalJWT(firebaseUid: string) {
+    try {
+      this.logger.info('Generating custom token', {
+        context: 'AuthService',
+        method: 'generateInternalJWT',
+        firebaseUid,
+      });
+
+      const farmer = await this.farmerRepository.findOne({
+        where: { firebaseUid }
+      });
+
+      if (!farmer) {
+        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
+      }
+
+      // Create custom token with farmer data
+      const customClaims = {
+        role: 'farmer',
+        hasProfile: !!farmer.name,
+        village: farmer.village,
+        language: farmer.language || 'hindi',
+        farmerId: farmer.firebaseUid,
+      };
+
+      const customToken = await this.firebaseService.createCustomToken(firebaseUid, customClaims);
+
+      return {
+        success: true,
+        customToken,
+        expiresIn: 3600, // 1 hour
+      };
+    } catch (error) {
+      this.logger.error('Failed to generate custom token', {
+        context: 'AuthService',
+        method: 'generateInternalJWT',
+        firebaseUid,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+}
