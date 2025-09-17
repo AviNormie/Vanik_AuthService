@@ -13,7 +13,7 @@ async function bootstrap() {
 
   // Enable CORS for frontend
   app.enableCors({
-    origin: ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8080'],
+    origin: ['https://your-frontend-domain.vercel.app', 'http://localhost:3000'],
     credentials: true,
   });
 
@@ -47,11 +47,38 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document);
 
-  const port = process.env.PORT ?? 3000;
+  const port = process.env.PORT || 3000;
   await app.listen(port);
 
   console.log(`🌾 Agricultural Platform API is running on: http://localhost:${port}`);
   console.log(`📚 Swagger UI is available at: http://localhost:${port}/api`);
   console.log(`🔥 Firebase Authentication enabled`);
 }
-bootstrap();
+
+// For Vercel serverless deployment
+if (process.env.NODE_ENV !== 'production') {
+  bootstrap();
+}
+
+// Export for Vercel
+export default async (req: any, res: any) => {
+  if (!global.__app) {
+    const app = await NestFactory.create(AppModule);
+    
+    app.enableCors({
+      origin: true,
+      credentials: true,
+    });
+    
+    app.useGlobalPipes(new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }));
+
+    await app.init();
+    global.__app = app.getHttpAdapter().getInstance();
+  }
+
+  return global.__app(req, res);
+};
