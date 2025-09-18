@@ -1,5 +1,6 @@
 // src/auth/auth.module.ts
 import { Module } from '@nestjs/common';
+import { UserSession } from './entities/user-session.entity';
 import { PassportModule } from '@nestjs/passport';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -8,8 +9,8 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { FirebaseAuthGuard } from './guards/firebase-auth.guard';
 import { Farmer } from '../farmers/entities/farmer.entity';
-import { UserSession } from './entities/user-session.entity';
-import { FirebaseModule } from '../firebase/firebase.module'; // Import FirebaseModule
+import { FirebaseModule } from '../firebase/firebase.module'; 
+import { PrismaService } from '../../prisma/prisma.service';
 
 @Module({
   imports: [
@@ -31,8 +32,9 @@ import { FirebaseModule } from '../firebase/firebase.module'; // Import Firebase
   controllers: [AuthController],
   providers: [
     AuthService, 
-    FirebaseAuthGuard
+    FirebaseAuthGuard,
+    PrismaService
   ],
-  exports: [AuthService, FirebaseAuthGuard],
+  exports: [AuthService, FirebaseAuthGuard, PrismaService],
 })
 export class AuthModule {}

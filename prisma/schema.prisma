@@ -1,13 +1,211 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
+// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
-  schemas   = ["app_auth", "marketplace", "ai_context"] // full access for auth service
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["app_auth", "marketplace", "ai_context"]
+}
+
+//
+// AUTH & CORE USER
+//
+model User {
+  id            String          @id @default(cuid())
+  phoneNumber   String          @unique
+  name          String?
+  image         String?
+  role          UserRole        @default(FARMER)
+  sessions      Session[]
+  apiKeys       ApiKey[]
+  credits       CreditBalance?
+  activityLogs  ActivityLog[]
+  // farmer context relation
+  farmerProfile FarmerProfile?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@schema("app_auth")
+}
+
+enum UserRole {
+  ADMIN
+  FARMER
+  AGENT
+
+  @@schema("app_auth")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  sessionToken String   @unique
+  expires      DateTime
+  createdAt    DateTime @default(now())
+
+  @@schema("app_auth")
+}
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  name      String?   // "Marketplace Agent", "AI Service"
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  @@schema("app_auth")
+}
+
+model CreditBalance {
+  id           String              @id @default(cuid())
+  userId       String              @unique
+  user         User                @relation(fields: [userId], references: [id])
+  balance      Int                 @default(0)
+  currency     String              @default("CREDITS")
+  transactions CreditTransaction[]
+
+  @@schema("app_auth")
+}
+
+model CreditTransaction {
+  id          String          @id @default(cuid())
+  creditId    String
+  credit      CreditBalance   @relation(fields: [creditId], references: [id])
+  amount      Int
+  type        TransactionType
+  description String?
+  createdAt   DateTime        @default(now())
+
+  @@schema("app_auth")
+}
+
+enum TransactionType {
+  RECHARGE
+  PURCHASE
+  REWARD
+  PENALTY
+
+  @@schema("app_auth")
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@schema("app_auth")
+}
+
+//
+// FARMER CONTEXT (AI CONTEXT)
+//
+model FarmerProfile {
+  id           String            @id @default(cuid())
+  userId       String            @unique
+  user         User              @relation(fields: [userId], references: [id])
+  languagePref String?           // "ml-IN", "hi-IN"
+  location     String?           // pincode / district / village
+  gpsLat       Float?
+  gpsLong      Float?
+  landHoldings LandHolding[]
+  crops        CropRecord[]
+  soilTests    SoilTest[]
+  queries      FarmerQuery[]
+  documents    FarmerDocument[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@schema("ai_context")
+}
+
+model LandHolding {
+  id        String        @id @default(cuid())
+  farmerId  String
+  farmer    FarmerProfile @relation(fields: [farmerId], references: [id])
+  sizeAcre  Float?
+  irrigation String?
+  location  String?
+  createdAt DateTime      @default(now())
+
+  @@schema("ai_context")
+}
+
+model CropRecord {
+  id              String        @id @default(cuid())
+  farmerId        String
+  farmer          FarmerProfile @relation(fields: [farmerId], references: [id])
+  cropType        String
+  variety         String?
+  season          String?
+  stage           CropStage     @default(SOWN)
+  sowingDate      DateTime?
+  expectedHarvest DateTime?
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@schema("ai_context")
+}
+
+enum CropStage {
+  PLANNING
+  SOWN
+  VEGETATIVE
+  FLOWERING
+  FRUITING
+  HARVEST
+  POSTHARVEST
+
+  @@schema("ai_context")
+}
+
+model SoilTest {
+  id            String        @id @default(cuid())
+  farmerId      String
+  farmer        FarmerProfile @relation(fields: [farmerId], references: [id])
+  sampleDate    DateTime
+  ph            Float?
+  nitrogen      Float?
+  phosphorus    Float?
+  potassium     Float?
+  organicCarbon Float?
+  notes         String?
+  createdAt     DateTime      @default(now())
+
+  @@schema("ai_context")
+}
+
+model FarmerQuery {
+  id         String        @id @default(cuid())
+  farmerId   String
+  farmer     FarmerProfile @relation(fields: [farmerId], references: [id])
+  queryText  String
+  answerText String?
+  language   String?
+  source     String?       // voice/text/image
+  metadata   Json?
+  embeddings Bytes?        // pgvector
+  createdAt  DateTime      @default(now())
+
+  @@schema("ai_context")
+}
+
+model FarmerDocument {
+  id        String        @id @default(cuid())
+  farmerId  String
+  farmer    FarmerProfile @relation(fields: [farmerId], references: [id])
+  docType   String
+  url       String
+  metadata  Json?
+  createdAt DateTime      @default(now())
+
+  @@schema("ai_context")
 }
