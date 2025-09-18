@@ -1,9 +1,7 @@
-// src/auth/auth.service.ts - EXPORT FIXED VERSION
+// src/auth/auth.service.ts - COMPLETE FIREBASE VERSION
 import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-
-// In-memory OTP storage
-const otpStore = new Map<string, { otp: string; expiresAt: Date }>();
+import { FirebaseService } from '../firebase/firebase.service';
 
 export interface CompleteProfileDto {
   name?: string;
@@ -13,26 +11,162 @@ export interface CompleteProfileDto {
   gpsLong?: number;
 }
 
-export interface OTPDebugInfo {
-  phoneNumber: string;
-  otp: string;
-  expiresAt: Date;
-  isExpired: boolean;
-}
-
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private firebaseService: FirebaseService,
+  ) {}
 
-  // ===== OTP METHODS =====
+  // ===== FIREBASE AUTHENTICATION METHODS =====
+
+  /**
+   * Verify Firebase ID token and create/update user in database
+   */
+  async verifyFirebaseToken(idToken: string, profileData?: CompleteProfileDto) {
+    try {
+      this.logger.log(`🔥 Starting Firebase token verification`);
+
+      // 1. Verify Firebase ID token
+      const decodedToken = await this.firebaseService.verifyIdToken(idToken);
+      
+      if (!decodedToken.phone_number) {
+        throw new HttpException('Phone number not found in Firebase token', HttpStatus.BAD_REQUEST);
+      }
+
+      this.logger.log(`✅ Firebase token verified for phone: ${decodedToken.phone_number}`);
+
+      // 2. Create or update user in database
+      const { user, isNewUser } = await this.createOrUpdateFirebaseUser(
+        decodedToken.phone_number,
+        decodedToken.uid,
+        profileData
+      );
+
+      // 3. Create session
+      const session = await this.createSession(user.id);
+
+      // 4. Log successful authentication
+      await this.logActivity(user.id, 'FIREBASE_LOGIN', {
+        source: 'FIREBASE_AUTH',
+        firebaseUID: decodedToken.uid,
+        isNewUser,
+      });
+
+      return {
+        user,
+        session,
+        isNewUser,
+        firebaseUID: decodedToken.uid,
+      };
+
+    } catch (error) {
+      this.logger.error(`❌ Firebase token verification failed:`, error);
+      throw new HttpException(
+        error.message || 'Firebase authentication failed',
+        error.status || HttpStatus.UNAUTHORIZED
+      );
+    }
+  }
+
+  /**
+   * Create or update user from Firebase authentication
+   */
+  async createOrUpdateFirebaseUser(phoneNumber: string, firebaseUID: string, profileData?: CompleteProfileDto) {
+    try {
+      this.logger.log(`👤 Creating/updating Firebase user: ${phoneNumber}, UID: ${firebaseUID}`);
+
+      // Check if user exists by phone number
+      const existingUser = await this.prisma.$queryRaw`
+        SELECT * FROM app_auth."User" 
+        WHERE "phoneNumber" = ${phoneNumber}
+        LIMIT 1
+      ` as any[];
+
+      let user: any;
+      let isNewUser = false;
+
+      if (!existingUser || existingUser.length === 0) {
+        // Create new user
+        isNewUser = true;
+        const userId = this.generateId();
+        
+        // Insert user
+        await this.prisma.$executeRaw`
+          INSERT INTO app_auth."User" (id, "phoneNumber", name, role, "createdAt", "updatedAt")
+          VALUES (${userId}, ${phoneNumber}, ${profileData?.name || null}, 'FARMER', NOW(), NOW())
+        `;
+
+        // Create credit balance
+        const creditId = this.generateId();
+        await this.prisma.$executeRaw`
+          INSERT INTO app_auth."CreditBalance" (id, "userId", balance, currency)
+          VALUES (${creditId}, ${userId}, 100, 'CREDITS')
+        `;
+
+        // Create farmer profile if data provided
+        if (profileData && (profileData.name || profileData.location)) {
+          const profileId = this.generateId();
+          await this.prisma.$executeRaw`
+            INSERT INTO app_auth."FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
+            VALUES (${profileId}, ${userId}, ${profileData.languagePref || 'hi-IN'}, ${profileData.location || null}, ${profileData.gpsLat || null}, ${profileData.gpsLong || null}, NOW(), NOW())
+          `;
+        }
+
+        user = { 
+          id: userId, 
+          phoneNumber, 
+          name: profileData?.name || null, 
+          role: 'FARMER',
+          firebaseUID,
+          isNewUser: true 
+        };
+        
+        this.logger.log(`✅ New Firebase user created: ${phoneNumber}`);
+      } else {
+        // Update existing user
+        user = existingUser[0];
+        user.firebaseUID = firebaseUID;
+        user.isNewUser = false;
+        
+        // Update name if provided and not already set
+        if (profileData?.name && !user.name) {
+          await this.prisma.$executeRaw`
+            UPDATE app_auth."User" SET name = ${profileData.name}, "updatedAt" = NOW()
+            WHERE id = ${user.id}
+          `;
+          user.name = profileData.name;
+        }
+        
+        this.logger.log(`✅ Existing Firebase user found: ${phoneNumber}`);
+      }
+
+      return { user, isNewUser };
+    } catch (error) {
+      this.logger.error(`❌ Failed to create/update Firebase user ${phoneNumber}:`, error);
+      throw new HttpException('Firebase user creation/update failed', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ===== LEGACY OTP METHODS (for fallback) =====
+
+  /**
+   * Send OTP to phone number (stored in database)
+   */
   async sendOTP(phoneNumber: string): Promise<void> {
     try {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
       
-      otpStore.set(phoneNumber, { otp, expiresAt });
+      // Store in database
+      await this.prisma.$executeRaw`
+        INSERT INTO app_auth."OTPStore" (id, "phoneNumber", otp, "expiresAt", "createdAt")
+        VALUES (${this.generateId()}, ${phoneNumber}, ${otp}, ${expiresAt}, NOW())
+        ON CONFLICT ("phoneNumber") 
+        DO UPDATE SET otp = ${otp}, "expiresAt" = ${expiresAt}, "createdAt" = NOW()
+      `;
       
       console.log(`🔑 OTP for ${phoneNumber}: ${otp}`);
       this.logger.log(`📱 OTP sent to ${phoneNumber}`);
@@ -42,27 +176,48 @@ export class AuthService {
     }
   }
 
+  /**
+   * Verify OTP from database
+   */
   async verifyOTP(phoneNumber: string, otp: string): Promise<boolean> {
     try {
-      const storedOTP = otpStore.get(phoneNumber);
-      
-      if (!storedOTP) {
-        this.logger.warn(`❌ No OTP found for: ${phoneNumber}`);
+      // Test mode for development
+      const testOTPs = {
+        '+916350194264': '123456',
+        '+919876543210': '123456',
+        '+919999999999': '123456',
+      };
+
+      if (testOTPs[phoneNumber] && otp === testOTPs[phoneNumber]) {
+        this.logger.log(`✅ Test OTP verified for: ${phoneNumber}`);
+        return true;
+      }
+
+      // Get from database
+      const storedOTPs = await this.prisma.$queryRaw`
+        SELECT * FROM app_auth."OTPStore" 
+        WHERE "phoneNumber" = ${phoneNumber} 
+        AND "expiresAt" > NOW()
+        LIMIT 1
+      ` as any[];
+
+      if (!storedOTPs || storedOTPs.length === 0) {
+        this.logger.warn(`❌ No valid OTP found for: ${phoneNumber}`);
         return false;
       }
 
-      if (new Date() > storedOTP.expiresAt) {
-        this.logger.warn(`⏰ OTP expired for: ${phoneNumber}`);
-        otpStore.delete(phoneNumber);
-        return false;
-      }
+      const storedOTP = storedOTPs[0];
 
       if (storedOTP.otp !== otp) {
         this.logger.warn(`❌ Invalid OTP for: ${phoneNumber}. Expected: ${storedOTP.otp}, Got: ${otp}`);
         return false;
       }
 
-      otpStore.delete(phoneNumber);
+      // Delete used OTP
+      await this.prisma.$executeRaw`
+        DELETE FROM app_auth."OTPStore" WHERE "phoneNumber" = ${phoneNumber}
+      `;
+
       this.logger.log(`✅ OTP verified successfully for: ${phoneNumber}`);
       return true;
     } catch (error) {
@@ -71,13 +226,15 @@ export class AuthService {
     }
   }
 
-  // ===== USER METHODS =====
+  /**
+   * Create or update user after OTP verification
+   */
   async createOrUpdateUser(phoneNumber: string, profileData?: CompleteProfileDto) {
     try {
       this.logger.log(`👤 Creating/updating user: ${phoneNumber}`);
 
       const existingUser = await this.prisma.$queryRaw`
-        SELECT * FROM "User" WHERE "phoneNumber" = ${phoneNumber} LIMIT 1
+        SELECT * FROM app_auth."User" WHERE "phoneNumber" = ${phoneNumber} LIMIT 1
       ` as any[];
 
       let user: any;
@@ -88,29 +245,23 @@ export class AuthService {
         const userId = this.generateId();
         
         await this.prisma.$executeRaw`
-          INSERT INTO "User" (id, "phoneNumber", name, role, "createdAt", "updatedAt")
+          INSERT INTO app_auth."User" (id, "phoneNumber", name, role, "createdAt", "updatedAt")
           VALUES (${userId}, ${phoneNumber}, ${profileData?.name || null}, 'FARMER', NOW(), NOW())
         `;
 
         const creditId = this.generateId();
         await this.prisma.$executeRaw`
-          INSERT INTO "CreditBalance" (id, "userId", balance, currency)
+          INSERT INTO app_auth."CreditBalance" (id, "userId", balance, currency)
           VALUES (${creditId}, ${userId}, 100, 'CREDITS')
         `;
 
         if (profileData && (profileData.name || profileData.location)) {
           const profileId = this.generateId();
           await this.prisma.$executeRaw`
-            INSERT INTO "FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
+            INSERT INTO app_auth."FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
             VALUES (${profileId}, ${userId}, ${profileData.languagePref || 'hi-IN'}, ${profileData.location || null}, ${profileData.gpsLat || null}, ${profileData.gpsLong || null}, NOW(), NOW())
           `;
         }
-
-        const logId = this.generateId();
-        await this.prisma.$executeRaw`
-          INSERT INTO "ActivityLog" (id, "userId", action, metadata, "createdAt")
-          VALUES (${logId}, ${userId}, 'USER_REGISTERED', '{"source": "OTP_VERIFICATION"}', NOW())
-        `;
 
         user = { 
           id: userId, 
@@ -133,7 +284,8 @@ export class AuthService {
     }
   }
 
-  // ===== SESSION METHODS =====
+  // ===== SESSION MANAGEMENT METHODS =====
+
   generateSessionToken(): string {
     return Math.random().toString(36).substring(2) + Date.now().toString(36);
   }
@@ -142,10 +294,10 @@ export class AuthService {
     try {
       const sessionToken = this.generateSessionToken();
       const sessionId = this.generateId();
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
       await this.prisma.$executeRaw`
-        INSERT INTO "Session" (id, "userId", "sessionToken", expires, "createdAt")
+        INSERT INTO app_auth."Session" (id, "userId", "sessionToken", expires, "createdAt")
         VALUES (${sessionId}, ${userId}, ${sessionToken}, ${expiresAt}, NOW())
       `;
 
@@ -165,8 +317,8 @@ export class AuthService {
   async validateSession(sessionToken: string) {
     try {
       const sessions = await this.prisma.$queryRaw`
-        SELECT s.*, u.* FROM "Session" s 
-        JOIN "User" u ON s."userId" = u.id 
+        SELECT s.*, u.* FROM app_auth."Session" s 
+        JOIN app_auth."User" u ON s."userId" = u.id 
         WHERE s."sessionToken" = ${sessionToken} AND s.expires > NOW()
         LIMIT 1
       ` as any[];
@@ -185,7 +337,7 @@ export class AuthService {
   async logout(sessionToken: string): Promise<boolean> {
     try {
       await this.prisma.$executeRaw`
-        DELETE FROM "Session" WHERE "sessionToken" = ${sessionToken}
+        DELETE FROM app_auth."Session" WHERE "sessionToken" = ${sessionToken}
       `;
       this.logger.log(`🚪 User logged out successfully`);
       return true;
@@ -196,11 +348,12 @@ export class AuthService {
   }
 
   // ===== PROFILE METHODS =====
+
   async getUserProfile(userId: string) {
     try {
       const users = await this.prisma.$queryRaw`
-        SELECT u.*, fp.* FROM "User" u 
-        LEFT JOIN "FarmerProfile" fp ON u.id = fp."userId"
+        SELECT u.*, fp.* FROM app_auth."User" u 
+        LEFT JOIN app_auth."FarmerProfile" fp ON u.id = fp."userId"
         WHERE u.id = ${userId}
         LIMIT 1
       ` as any[];
@@ -222,24 +375,24 @@ export class AuthService {
 
       if (profileData.name) {
         await this.prisma.$executeRaw`
-          UPDATE "User" SET name = ${profileData.name}, "updatedAt" = NOW()
+          UPDATE app_auth."User" SET name = ${profileData.name}, "updatedAt" = NOW()
           WHERE id = ${userId}
         `;
       }
 
       const existingProfile = await this.prisma.$queryRaw`
-        SELECT * FROM "FarmerProfile" WHERE "userId" = ${userId} LIMIT 1
+        SELECT * FROM app_auth."FarmerProfile" WHERE "userId" = ${userId} LIMIT 1
       ` as any[];
 
       if (!existingProfile || existingProfile.length === 0) {
         const profileId = this.generateId();
         await this.prisma.$executeRaw`
-          INSERT INTO "FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
+          INSERT INTO app_auth."FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
           VALUES (${profileId}, ${userId}, ${profileData.languagePref || 'hi-IN'}, ${profileData.location || null}, ${profileData.gpsLat || null}, ${profileData.gpsLong || null}, NOW(), NOW())
         `;
       } else {
         await this.prisma.$executeRaw`
-          UPDATE "FarmerProfile" 
+          UPDATE app_auth."FarmerProfile" 
           SET "languagePref" = ${profileData.languagePref || 'hi-IN'},
               location = ${profileData.location || null},
               "gpsLat" = ${profileData.gpsLat || null},
@@ -257,11 +410,30 @@ export class AuthService {
     }
   }
 
-  // ===== CREDIT METHODS =====
+  // ===== UTILITY METHODS =====
+
+  private generateId(): string {
+    const timestamp = Date.now().toString(36);
+    const randomPart = Math.random().toString(36).substring(2);
+    return `clx${timestamp}${randomPart}`;
+  }
+
+  async logActivity(userId: string, action: string, metadata?: any) {
+    try {
+      const logId = this.generateId();
+      await this.prisma.$executeRaw`
+        INSERT INTO app_auth."ActivityLog" (id, "userId", action, metadata, "createdAt")
+        VALUES (${logId}, ${userId}, ${action}, ${JSON.stringify(metadata)}, NOW())
+      `;
+    } catch (error) {
+      this.logger.error(`❌ Failed to log activity for user ${userId}:`, error);
+    }
+  }
+
   async hasSufficientCredits(userId: string, requiredAmount: number): Promise<boolean> {
     try {
       const credits = await this.prisma.$queryRaw`
-        SELECT balance FROM "CreditBalance" WHERE "userId" = ${userId}
+        SELECT balance FROM app_auth."CreditBalance" WHERE "userId" = ${userId}
         LIMIT 1
       ` as any[];
 
@@ -276,69 +448,20 @@ export class AuthService {
     }
   }
 
-  async updateCredits(userId: string, amount: number): Promise<boolean> {
-    try {
-      await this.prisma.$executeRaw`
-        UPDATE "CreditBalance" 
-        SET balance = balance + ${amount}
-        WHERE "userId" = ${userId}
-      `;
-      
-      this.logger.log(`💰 Credits updated for user ${userId}: ${amount > 0 ? '+' : ''}${amount}`);
-      return true;
-    } catch (error) {
-      this.logger.error(`❌ Failed to update credits for user ${userId}:`, error);
-      return false;
-    }
-  }
-
-  // ===== UTILITY METHODS =====
-  private generateId(): string {
-    const timestamp = Date.now().toString(36);
-    const randomPart = Math.random().toString(36).substring(2);
-    return `clx${timestamp}${randomPart}`;
-  }
-
-  cleanupExpiredOTPs(): void {
-    const now = new Date();
-    let cleanedCount = 0;
-    
-    for (const [phoneNumber, otpData] of otpStore.entries()) {
-      if (now > otpData.expiresAt) {
-        otpStore.delete(phoneNumber);
-        cleanedCount++;
-      }
-    }
-    
-    if (cleanedCount > 0) {
-      this.logger.log(`🧹 Cleaned up ${cleanedCount} expired OTPs`);
-    }
-  }
-
   // ===== DEBUG METHODS =====
+
   getDebugInfo() {
-    const otps: any[] = [];
-    
-    for (const [phoneNumber, otpData] of otpStore.entries()) {
-      otps.push({
-        phoneNumber,
-        otp: otpData.otp,
-        expiresAt: otpData.expiresAt,
-        isExpired: new Date() > otpData.expiresAt
-      });
-    }
-    
     return {
-      activeOTPs: otps.length,
-      otps: otps
+      timestamp: new Date().toISOString(),
+      service: 'Firebase + OTP Auth Service',
     };
   }
 
   async getAppStats() {
     try {
-      const totalUsers = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM "User"` as any[];
-      const activeSessions = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM "Session" WHERE expires > NOW()` as any[];
-      const totalCredits = await this.prisma.$queryRaw`SELECT SUM(balance) as total FROM "CreditBalance"` as any[];
+      const totalUsers = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM app_auth."User"` as any[];
+      const activeSessions = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM app_auth."Session" WHERE expires > NOW()` as any[];
+      const totalCredits = await this.prisma.$queryRaw`SELECT SUM(balance) as total FROM app_auth."CreditBalance"` as any[];
 
       return {
         totalUsers: Number(totalUsers[0]?.count || 0),
@@ -352,41 +475,6 @@ export class AuthService {
         activeSessions: 0,
         totalCreditsIssued: 0,
       };
-    }
-  }
-
-  // ===== ADDITIONAL HELPER METHODS =====
-  async getAllUsers(limit: number = 50) {
-    try {
-      const users = await this.prisma.$queryRaw`
-        SELECT u.*, fp.location, fp."languagePref", cb.balance as credits
-        FROM "User" u 
-        LEFT JOIN "FarmerProfile" fp ON u.id = fp."userId"
-        LEFT JOIN "CreditBalance" cb ON u.id = cb."userId"
-        ORDER BY u."createdAt" DESC
-        LIMIT ${limit}
-      ` as any[];
-
-      return users;
-    } catch (error) {
-      this.logger.error('❌ Failed to get all users:', error);
-      return [];
-    }
-  }
-
-  async deleteUser(userId: string): Promise<boolean> {
-    try {
-      await this.prisma.$executeRaw`DELETE FROM "ActivityLog" WHERE "userId" = ${userId}`;
-      await this.prisma.$executeRaw`DELETE FROM "Session" WHERE "userId" = ${userId}`;
-      await this.prisma.$executeRaw`DELETE FROM "FarmerProfile" WHERE "userId" = ${userId}`;
-      await this.prisma.$executeRaw`DELETE FROM "CreditBalance" WHERE "userId" = ${userId}`;
-      await this.prisma.$executeRaw`DELETE FROM "User" WHERE id = ${userId}`;
-
-      this.logger.log(`🗑️ User deleted: ${userId}`);
-      return true;
-    } catch (error) {
-      this.logger.error(`❌ Failed to delete user ${userId}:`, error);
-      return false;
     }
   }
 }
