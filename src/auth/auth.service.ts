@@ -30,35 +30,50 @@ export class AuthService {
   async verifyFirebaseToken(idToken: string, profileData?: CompleteProfileDto) {
     try {
       this.logger.log(`🔥 Starting Firebase token verification`);
+      this.logger.log(`🎫 Token length: ${idToken?.length || 0}`);
 
       // 1. Verify Firebase ID token
+      this.logger.log('🔄 Calling Firebase verifyIdToken...');
       const decodedToken = await this.firebaseService.verifyIdToken(idToken);
       
+      this.logger.log('✅ Firebase token decoded successfully');
+      this.logger.log(`📱 Decoded token phone: ${decodedToken.phone_number}`);
+      this.logger.log(`🆔 Decoded token UID: ${decodedToken.uid}`);
+      
       if (!decodedToken.phone_number) {
+        this.logger.error('❌ No phone number in Firebase token');
         throw new HttpException('Phone number not found in Firebase token', HttpStatus.BAD_REQUEST);
       }
 
       this.logger.log(`✅ Firebase token verified for phone: ${decodedToken.phone_number}`);
 
       // 2. Create or update user in database
+      this.logger.log('🔄 Creating/updating user in database...');
       const { user, isNewUser } = await this.createOrUpdateFirebaseUser(
         decodedToken.phone_number,
         decodedToken.uid,
         profileData
       );
 
+      this.logger.log(`👤 User ${isNewUser ? 'created' : 'updated'}: ${user.id}`);
+
       // 3. Generate JWT token
+      this.logger.log('🔄 Generating JWT token...');
       const jwtToken = this.jwtService.generateToken(user.id, user.phoneNumber, user.role);
       const tokenExpiration = this.jwtService.getTokenExpiration(jwtToken);
 
+      this.logger.log(`🎫 JWT token generated: ${jwtToken ? 'YES' : 'NO'}`);
+      this.logger.log(`⏰ Token expires: ${tokenExpiration}`);
+
       // 4. Log successful authentication
+      this.logger.log('🔄 Logging activity...');
       await this.logActivity(user.id, 'FIREBASE_LOGIN', {
         source: 'FIREBASE_AUTH',
         firebaseUID: decodedToken.uid,
         isNewUser,
       });
 
-      return {
+      const result = {
         user,
         token: jwtToken,
         expires: tokenExpiration,
@@ -66,8 +81,12 @@ export class AuthService {
         firebaseUID: decodedToken.uid,
       };
 
+      this.logger.log('✅ Firebase authentication completed successfully');
+      return result;
+
     } catch (error) {
-      this.logger.error(`❌ Firebase token verification failed:`, error);
+      this.logger.error(`❌ Firebase token verification failed:`, error.message);
+      this.logger.error(`❌ Error details:`, error);
       throw new HttpException(
         error.message || 'Firebase authentication failed',
         error.status || HttpStatus.UNAUTHORIZED
