@@ -23,6 +23,15 @@ export class FirebaseService implements OnModuleInit {
         privateKey: this.configService.get<string>('FIREBASE_PRIVATE_KEY')?.replace(/\\n/g, '\n'),
       };
 
+      // Check if all required Firebase credentials are provided
+      if (!serviceAccount.projectId || !serviceAccount.clientEmail || !serviceAccount.privateKey || 
+          serviceAccount.projectId === 'your-firebase-project-id') {
+        this.logger.warn('Firebase credentials not configured. Firebase features will be disabled.', {
+          context: 'FirebaseService',
+        });
+        return;
+      }
+
       this.app = admin.initializeApp({
         credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
         projectId: serviceAccount.projectId,
@@ -33,19 +42,25 @@ export class FirebaseService implements OnModuleInit {
         projectId: serviceAccount.projectId,
       });
     } catch (error) {
-      this.logger.error('Failed to initialize Firebase Admin SDK', {
+      this.logger.warn('Failed to initialize Firebase Admin SDK. Firebase features will be disabled.', {
         context: 'FirebaseService',
         error: error.message,
       });
-      throw error;
+      // Don't throw error, just log warning and continue without Firebase
     }
   }
 
   get auth(): admin.auth.Auth {
+    if (!this.app) {
+      throw new Error('Firebase not initialized. Please configure Firebase credentials.');
+    }
     return admin.auth(this.app);
   }
 
   get firestore(): admin.firestore.Firestore {
+    if (!this.app) {
+      throw new Error('Firebase not initialized. Please configure Firebase credentials.');
+    }
     return admin.firestore(this.app);
   }
 
