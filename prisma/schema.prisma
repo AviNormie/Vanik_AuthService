@@ -8,12 +8,18 @@ datasource db {
 }
 
 model User {
-  id          String @id @default(cuid())
-  phoneNumber String @unique
-  name        String?
-  role        String @default("FARMER")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String         @id @default(cuid())
+  phoneNumber   String         @unique
+  name          String?
+  role          String         @default("FARMER")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  // Relations
+  sessions      Session[]
+  credits       CreditBalance?
+  activityLogs  ActivityLog[]
+  farmerProfile FarmerProfile?
 }
 
 model Session {
@@ -22,13 +28,34 @@ model Session {
   sessionToken String   @unique
   expires      DateTime
   createdAt    DateTime @default(now())
+  
+  // Relations
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model CreditBalance {
-  id       String @id @default(cuid())
-  userId   String @unique
-  balance  Int    @default(0)
-  currency String @default("CREDITS")
+  id           String             @id @default(cuid())
+  userId       String             @unique
+  balance      Int                @default(0)
+  currency     String             @default("CREDITS")
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  
+  // Relations
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions CreditTransaction[]
+}
+
+model CreditTransaction {
+  id              String        @id @default(cuid())
+  creditBalanceId String
+  amount          Int
+  type            String        // RECHARGE, PURCHASE, REFUND
+  description     String?
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  creditBalance   CreditBalance @relation(fields: [creditBalanceId], references: [id], onDelete: Cascade)
 }
 
 model ActivityLog {
@@ -37,15 +64,83 @@ model ActivityLog {
   action    String
   metadata  Json?
   createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model FarmerProfile {
-  id           String  @id @default(cuid())
-  userId       String  @unique
+  id           String        @id @default(cuid())
+  userId       String        @unique
   languagePref String?
   location     String?
   gpsLat       Float?
   gpsLong      Float?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  landHoldings LandHolding[]
+  crops        CropRecord[]
+  queries      FarmerQuery[]
+  soilTests    SoilTest[]
+}
+
+model LandHolding {
+  id         String        @id @default(cuid())
+  farmerId   String
+  sizeAcre   Float?
+  irrigation String?
+  location   String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  
+  // Relations
+  farmer     FarmerProfile @relation(fields: [farmerId], references: [id], onDelete: Cascade)
+}
+
+model CropRecord {
+  id        String        @id @default(cuid())
+  farmerId  String
+  cropType  String
+  variety   String?
+  season    String?
+  stage     String?       // PLANNING, SOWN, VEGETATIVE, FLOWERING, FRUITING, HARVEST, POSTHARVEST
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  
+  // Relations
+  farmer    FarmerProfile @relation(fields: [farmerId], references: [id], onDelete: Cascade)
+}
+
+model FarmerQuery {
+  id         String        @id @default(cuid())
+  farmerId   String
+  queryText  String
+  answerText String?
+  language   String        @default("hi-IN")
+  source     String        @default("text")
+  metadata   Json?
+  createdAt  DateTime      @default(now())
+  
+  // Relations
+  farmer     FarmerProfile @relation(fields: [farmerId], references: [id], onDelete: Cascade)
+}
+
+model SoilTest {
+  id        String        @id @default(cuid())
+  farmerId  String
+  ph        Float?
+  nitrogen  Float?
+  phosphorus Float?
+  potassium Float?
+  organic   Float?
+  moisture  Float?
+  location  String?
+  testDate  DateTime?
+  createdAt DateTime      @default(now())
+  
+  // Relations
+  farmer    FarmerProfile @relation(fields: [farmerId], references: [id], onDelete: Cascade)
 }
