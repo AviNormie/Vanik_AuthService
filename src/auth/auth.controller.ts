@@ -84,10 +84,8 @@ export class AuthController {
           firebaseUID: result.firebaseUID,
           isNewUser: result.isNewUser,
         },
-        session: {
-          token: result.session.sessionToken,
-          expires: result.session.expires,
-        }
+        token: result.token,
+        expires: result.expires
       };
 
     } catch (error) {
@@ -101,61 +99,76 @@ export class AuthController {
 
 
 
-  // ===== SESSION MANAGEMENT =====
+  // ===== JWT TOKEN MANAGEMENT =====
 
-  @Post('logout')
-  async logout(@Body() logoutRequest: { sessionToken: string }) {
-    const { sessionToken } = logoutRequest;
+  @Post('validate-token')
+  async validateToken(@Body() validateRequest: { token: string }) {
+    const { token } = validateRequest;
 
-    if (!sessionToken) {
-      throw new HttpException('Session token is required', HttpStatus.BAD_REQUEST);
+    if (!token) {
+      throw new HttpException('JWT token is required', HttpStatus.BAD_REQUEST);
     }
 
     try {
-      const success = await this.authService.logout(sessionToken);
+      const result = await this.authService.validateJwtToken(token);
       
-      return {
-        success,
-        message: success ? 'Logged out successfully' : 'Logout failed',
-      };
-    } catch (error) {
-      this.logger.error('❌ Logout error:', error);
-      throw new HttpException('Logout failed', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  @Post('validate-session')
-  async validateSession(@Body() validateRequest: { sessionToken: string }) {
-    const { sessionToken } = validateRequest;
-
-    if (!sessionToken) {
-      throw new HttpException('Session token is required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const session = await this.authService.validateSession(sessionToken);
-      
-      if (!session) {
-        throw new HttpException('Invalid or expired session', HttpStatus.UNAUTHORIZED);
-      }
-
       return {
         success: true,
         valid: true,
         user: {
-          id: session.id,
-          phoneNumber: session.phoneNumber,
-          name: session.name,
-        }
+          id: result.user.id,
+          phoneNumber: result.user.phoneNumber,
+          name: result.user.name,
+          role: result.user.role,
+        },
+        payload: result.payload,
       };
     } catch (error) {
-      return {
-        success: false,
-        valid: false,
-        message: 'Session validation failed',
-      };
+      this.logger.error('❌ Token validation error:', error);
+      throw new HttpException('Invalid or expired token', HttpStatus.UNAUTHORIZED);
     }
   }
+
+  @Post('refresh-token')
+  async refreshToken(@Body() refreshRequest: { token: string }) {
+    const { token } = refreshRequest;
+
+    if (!token) {
+      throw new HttpException('JWT token is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const result = await this.authService.refreshJwtToken(token);
+      
+      return {
+        success: true,
+        token: result.token,
+        expires: result.expires,
+      };
+    } catch (error) {
+      this.logger.error('❌ Token refresh error:', error);
+      throw new HttpException('Token refresh failed', HttpStatus.UNAUTHORIZED);
+    }
+  }
+
+  // Note: JWT tokens are stateless, so logout is handled client-side
+  // by simply discarding the token. No server-side action needed.
+  @Post('logout')
+  async logout() {
+    return {
+      success: true,
+      message: 'Logged out successfully. Please discard the JWT token on client side.',
+    };
+  }
+
+  // Legacy endpoint for backward compatibility
+  @Post('validate-session')
+  async validateSession(@Body() validateRequest: { sessionToken: string }) {
+    // Redirect to validate-token for JWT-based validation
+    return this.validateToken({ token: validateRequest.sessionToken });
+  }
+
+
 
   @Post('profile')
   async getUserProfile(@Body() profileRequest: { userId: string }) {
@@ -202,7 +215,7 @@ export class AuthController {
 
   @Post('complete-profile')
   async completeProfile(@Body() completeProfileRequest: { 
-    token?: string;
+    token: string;
     name: string;
     village?: string;
     district?: string;
@@ -210,23 +223,69 @@ export class AuthController {
     farmSize?: number;
     cropTypes?: string[];
     language?: string;
+    languagePref?: string;
+    location?: string;
+    gpsLat?: number;
+    gpsLong?: number;
   }) {
-    const { token, name, village, district, state, farmSize, cropTypes, language } = completeProfileRequest;
+    const { 
+      token, 
+      name, 
+      village, 
+      district, 
+      state, 
+      farmSize, 
+      cropTypes, 
+      language,
+      languagePref,
+      location,
+      gpsLat,
+      gpsLong 
+    } = completeProfileRequest;
+
+    if (!token) {
+      throw new HttpException('JWT token is required', HttpStatus.BAD_REQUEST);
+    }
 
     if (!name) {
       throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
     }
 
     try {
-      // For now, we'll use a simple approach - in a real app, you'd validate the token
-      // and get the user ID from it
-      this.logger.log(`📝 Profile completion request for: ${name}`);
+      // Validate JWT token and get user ID
+      const tokenValidation = await this.authService.validateJwtToken(token);
+      const userId = tokenValidation.user.id;
+      
+      this.logger.log(`📝 Profile completion request for user: ${userId}, name: ${name}`);
+      
+      // Prepare profile data for database update
+       const locationString = location || `${village || ''}, ${district || ''}, ${state || ''}`.trim().replace(/^,\s*|,\s*$/g, '');
+       const profileData: CompleteProfileDto = {
+         name,
+         languagePref: languagePref || language || 'hi-IN',
+         location: locationString || undefined,
+         gpsLat,
+         gpsLong,
+       };
+
+      // Update user profile in database
+      const updatedProfile = await this.authService.updateUserProfile(userId, profileData);
       
       return {
         success: true,
         message: 'Profile completed successfully',
-        farmer: {
-          name,
+        user: {
+          id: userId,
+          name: updatedProfile.name,
+          phoneNumber: updatedProfile.phoneNumber,
+          role: updatedProfile.role,
+        },
+        farmerProfile: {
+          languagePref: updatedProfile.languagePref,
+          location: updatedProfile.location,
+          gpsLat: updatedProfile.gpsLat,
+          gpsLong: updatedProfile.gpsLong,
+          // Additional fields for frontend compatibility
           village: village || null,
           district: district || null,
           state: state || null,

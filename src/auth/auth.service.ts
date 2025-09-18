@@ -1,7 +1,8 @@
-// src/auth/auth.service.ts - COMPLETE FIREBASE VERSION
+// src/auth/auth.service.ts - JWT VERSION
 import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
+import { JwtService } from './jwt.service';
 
 export interface CompleteProfileDto {
   name?: string;
@@ -18,6 +19,7 @@ export class AuthService {
   constructor(
     private prisma: PrismaService,
     private firebaseService: FirebaseService,
+    private jwtService: JwtService,
   ) {}
 
   // ===== FIREBASE AUTHENTICATION METHODS =====
@@ -45,8 +47,9 @@ export class AuthService {
         profileData
       );
 
-      // 3. Create session
-      const session = await this.createSession(user.id);
+      // 3. Generate JWT token
+      const jwtToken = this.jwtService.generateToken(user.id, user.phoneNumber, user.role);
+      const tokenExpiration = this.jwtService.getTokenExpiration(jwtToken);
 
       // 4. Log successful authentication
       await this.logActivity(user.id, 'FIREBASE_LOGIN', {
@@ -57,7 +60,8 @@ export class AuthService {
 
       return {
         user,
-        session,
+        token: jwtToken,
+        expires: tokenExpiration,
         isNewUser,
         firebaseUID: decodedToken.uid,
       };
@@ -151,64 +155,63 @@ export class AuthService {
   }
 
 
-  generateSessionToken(): string {
-    return Math.random().toString(36).substring(2) + Date.now().toString(36);
-  }
-
-  async createSession(userId: string) {
+  /**
+   * Validate JWT token and return user data
+   */
+  async validateJwtToken(token: string) {
     try {
-      const sessionToken = this.generateSessionToken();
-      const sessionId = this.generateId();
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-
-      await this.prisma.$executeRaw`
-        INSERT INTO app_auth."Session" (id, "userId", "sessionToken", expires, "createdAt")
-        VALUES (${sessionId}, ${userId}, ${sessionToken}, ${expiresAt}, NOW())
-      `;
-
-      this.logger.log(`🔑 Session created for user: ${userId}`);
-
-      return {
-        id: sessionId,
-        sessionToken,
-        expires: expiresAt,
-      };
-    } catch (error) {
-      this.logger.error(`❌ Failed to create session for user ${userId}:`, error);
-      throw new HttpException('Session creation failed', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  async validateSession(sessionToken: string) {
-    try {
-      const sessions = await this.prisma.$queryRaw`
-        SELECT s.*, u.* FROM app_auth."Session" s 
-        JOIN app_auth."User" u ON s."userId" = u.id 
-        WHERE s."sessionToken" = ${sessionToken} AND s.expires > NOW()
+      this.logger.log(`🔍 Validating JWT token`);
+      
+      // Verify and decode the JWT token
+      const payload = this.jwtService.verifyToken(token);
+      
+      // Get user from database
+      const users = await this.prisma.$queryRaw`
+        SELECT * FROM app_auth."User" 
+        WHERE id = ${payload.sub}
         LIMIT 1
       ` as any[];
 
-      if (!sessions || sessions.length === 0) {
-        return null;
+      if (!users || users.length === 0) {
+        throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
       }
 
-      return sessions[0];
+      const user = users[0];
+      this.logger.log(`✅ JWT token validated for user: ${user.phoneNumber}`);
+      
+      return {
+        user,
+        payload,
+      };
     } catch (error) {
-      this.logger.error('❌ Session validation failed:', error);
-      return null;
+      this.logger.error(`❌ JWT token validation failed:`, error);
+      throw new HttpException(
+        error.message || 'Invalid token',
+        HttpStatus.UNAUTHORIZED
+      );
     }
   }
 
-  async logout(sessionToken: string): Promise<boolean> {
+  /**
+   * Refresh JWT token
+   */
+  async refreshJwtToken(oldToken: string) {
     try {
-      await this.prisma.$executeRaw`
-        DELETE FROM app_auth."Session" WHERE "sessionToken" = ${sessionToken}
-      `;
-      this.logger.log(`🚪 User logged out successfully`);
-      return true;
+      this.logger.log(`🔄 Refreshing JWT token`);
+      
+      const newToken = this.jwtService.refreshToken(oldToken);
+      const tokenExpiration = this.jwtService.getTokenExpiration(newToken);
+      
+      return {
+        token: newToken,
+        expires: tokenExpiration,
+      };
     } catch (error) {
-      this.logger.error('❌ Logout failed:', error);
-      return false;
+      this.logger.error(`❌ JWT token refresh failed:`, error);
+      throw new HttpException(
+        'Token refresh failed',
+        HttpStatus.UNAUTHORIZED
+      );
     }
   }
 
