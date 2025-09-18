@@ -52,9 +52,15 @@ export class AuthController {
 
   @Post('verify-firebase')
   async verifyFirebase(@Body() verifyFirebaseRequest: VerifyFirebaseRequest) {
+    this.logger.log('🌐 Received verify-firebase request');
+    this.logger.log('📤 Request body keys:', Object.keys(verifyFirebaseRequest));
+    
     const { idToken, phoneNumber, uid, name, languagePref, location, gpsLat, gpsLong } = verifyFirebaseRequest;
 
+    this.logger.log(`📋 Request details: UID=${uid}, phoneNumber=${phoneNumber}, hasIdToken=${!!idToken}`);
+
     if (!idToken || !uid) {
+      this.logger.error('❌ Missing required fields: idToken or UID');
       throw new HttpException('Firebase ID token and UID are required', HttpStatus.BAD_REQUEST);
     }
 
@@ -69,11 +75,13 @@ export class AuthController {
         gpsLong,
       };
 
+      this.logger.log('🔄 Calling authService.verifyFirebaseToken...');
       const result = await this.authService.verifyFirebaseToken(idToken, profileData);
 
       this.logger.log(`✅ Firebase authentication successful for: ${result.user.phoneNumber}`);
+      this.logger.log(`🎫 Generated JWT token: ${result.token ? 'YES' : 'NO'}`);
 
-      return {
+      const response = {
         success: true,
         message: 'Firebase authentication successful',
         user: {
@@ -84,12 +92,18 @@ export class AuthController {
           firebaseUID: result.firebaseUID,
           isNewUser: result.isNewUser,
         },
-        token: result.token,
-        expires: result.expires
+        session: {
+          token: result.token,
+          expires: result.expires
+        }
       };
 
+      this.logger.log('📤 Sending response with user ID:', result.user.id);
+      return response;
+
     } catch (error) {
-      this.logger.error('❌ Firebase authentication error:', error);
+      this.logger.error('❌ Firebase authentication error:', error.message);
+      this.logger.error('❌ Error stack:', error.stack);
       throw new HttpException(
         error.message || 'Firebase authentication failed',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR
