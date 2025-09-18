@@ -5,6 +5,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  schemas  = ["app_auth"]
 }
 
 model User {
@@ -14,14 +15,18 @@ model User {
   role        String @default("FARMER")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@schema("app_auth")
 }
- 
+
 model Session {
   id           String   @id @default(cuid())
   userId       String
   sessionToken String   @unique
   expires      DateTime
   createdAt    DateTime @default(now())
+
+  @@schema("app_auth")
 }
 
 model CreditBalance {
@@ -29,6 +34,8 @@ model CreditBalance {
   userId   String @unique
   balance  Int    @default(0)
   currency String @default("CREDITS")
+
+  @@schema("app_auth")
 }
 
 model ActivityLog {
@@ -37,6 +44,8 @@ model ActivityLog {
   action    String
   metadata  Json?
   createdAt DateTime @default(now())
+
+  @@schema("app_auth")
 }
 
 model FarmerProfile {
@@ -48,4 +57,16 @@ model FarmerProfile {
   gpsLong      Float?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  @@schema("app_auth")
+}
+
+model OTPStore {
+  id          String   @id @default(cuid())
+  phoneNumber String   @unique
+  otp         String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@schema("app_auth")
 }
