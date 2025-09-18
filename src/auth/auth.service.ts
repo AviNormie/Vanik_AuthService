@@ -1,28 +1,15 @@
-// src/auth/auth.service.ts
+// src/auth/auth.service.ts - JWT VERSION
 import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FirebaseService } from '../firebase/firebase.service';
+import { JwtService } from './jwt.service';
 
-// In-memory OTP storage for hackathon (use Redis in production)
-const otpStore = new Map<string, { otp: string; expiresAt: Date }>();
-
-interface CompleteProfileDto {
-  name: string;
+export interface CompleteProfileDto {
+  name?: string;
   languagePref?: string;
   location?: string;
   gpsLat?: number;
   gpsLong?: number;
-  landHoldings?: {
-    sizeAcre?: number;
-    irrigation?: string;
-    location?: string;
-  }[];
-  crops?: {
-    cropType: string;
-    variety?: string;
-    season?: string;
-    stage?: 'PLANNING' | 'SOWN' | 'VEGETATIVE' | 'FLOWERING' | 'FRUITING' | 'HARVEST' | 'POSTHARVEST';
-  }[];
 }
 
 @Injectable()
@@ -31,629 +18,371 @@ export class AuthService {
 
   constructor(
     private prisma: PrismaService,
-    private jwtService?: JwtService,
+    private firebaseService: FirebaseService,
+    private jwtService: JwtService,
   ) {}
 
-  // ===== OTP AUTHENTICATION METHODS =====
+  // ===== FIREBASE AUTHENTICATION METHODS =====
 
   /**
-   * Send OTP to phone number
+   * Verify Firebase ID token and create/update user in database
    */
-  async sendOTP(phoneNumber: string): Promise<void> {
+  async verifyFirebaseToken(idToken: string, profileData?: CompleteProfileDto) {
     try {
-      this.logger.log(`📱 Sending OTP to: ${phoneNumber}`);
+      this.logger.log(`🔥 Starting Firebase token verification`);
+      this.logger.log(`🎫 Token length: ${idToken?.length || 0}`);
 
-      // Generate 6-digit OTP
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
-
-      // Store OTP in memory (use Redis in production)
-      otpStore.set(phoneNumber, { otp, expiresAt });
-
-      // For hackathon: Log the OTP (in production: send via SMS)
-      console.log(`🔑 OTP for ${phoneNumber}: ${otp} (expires in 5 minutes)`);
+      // 1. Verify Firebase ID token
+      this.logger.log('🔄 Calling Firebase verifyIdToken...');
+      const decodedToken = await this.firebaseService.verifyIdToken(idToken);
       
-      // TODO: Integrate with SMS service
-      // await this.smsService.sendSMS(phoneNumber, `Your agricultural AI assistant OTP: ${otp}. Valid for 5 minutes.`);
-
-      this.logger.log(`✅ OTP sent successfully to ${phoneNumber}`);
-    } catch (error) {
-      this.logger.error(`❌ Failed to send OTP to ${phoneNumber}:`, error);
-      throw new HttpException('Failed to send OTP', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  /**
-   * Verify OTP and return validation result
-   */
-  async verifyOTP(phoneNumber: string, otp: string): Promise<boolean> {
-    try {
-      this.logger.log(`🔍 Verifying OTP for: ${phoneNumber}`);
-
-      const storedOTP = otpStore.get(phoneNumber);
-
-      if (!storedOTP) {
-        this.logger.warn(`❌ No OTP found for: ${phoneNumber}`);
-        return false;
+      this.logger.log('✅ Firebase token decoded successfully');
+      this.logger.log(`📱 Decoded token phone: ${decodedToken.phone_number}`);
+      this.logger.log(`🆔 Decoded token UID: ${decodedToken.uid}`);
+      
+      if (!decodedToken.phone_number) {
+        this.logger.error('❌ No phone number in Firebase token');
+        throw new HttpException('Phone number not found in Firebase token', HttpStatus.BAD_REQUEST);
       }
 
-      // Check if OTP is expired
-      if (new Date() > storedOTP.expiresAt) {
-        this.logger.warn(`⏰ OTP expired for: ${phoneNumber}`);
-        otpStore.delete(phoneNumber);
-        return false;
-      }
+      this.logger.log(`✅ Firebase token verified for phone: ${decodedToken.phone_number}`);
 
-      // Check if OTP matches
-      if (storedOTP.otp !== otp) {
-        this.logger.warn(`❌ Invalid OTP for: ${phoneNumber}`);
-        return false;
-      }
+      // 2. Create or update user in database
+      this.logger.log('🔄 Creating/updating user in database...');
+      const { user, isNewUser } = await this.createOrUpdateFirebaseUser(
+        decodedToken.phone_number,
+        decodedToken.uid,
+        profileData
+      );
 
-      // OTP is valid - clean up
-      otpStore.delete(phoneNumber);
-      this.logger.log(`✅ OTP verified successfully for: ${phoneNumber}`);
-      return true;
+      this.logger.log(`👤 User ${isNewUser ? 'created' : 'updated'}: ${user.id}`);
 
-    } catch (error) {
-      this.logger.error(`❌ OTP verification error for ${phoneNumber}:`, error);
-      return false;
-    }
-  }
+      // 3. Generate JWT token
+      this.logger.log('🔄 Generating JWT token...');
+      const jwtToken = this.jwtService.generateToken(user.id, user.phoneNumber, user.role);
+      const tokenExpiration = this.jwtService.getTokenExpiration(jwtToken);
 
-  // ===== USER MANAGEMENT METHODS =====
+      this.logger.log(`🎫 JWT token generated: ${jwtToken ? 'YES' : 'NO'}`);
+      this.logger.log(`⏰ Token expires: ${tokenExpiration}`);
 
-  /**
-   * Create or update user after successful OTP verification
-   */
-  async createOrUpdateUser(phoneNumber: string, profileData?: CompleteProfileDto) {
-    try {
-      this.logger.log(`👤 Creating/updating user: ${phoneNumber}`);
-
-      // Check if user exists
-      let user = await this.prisma.user.findUnique({
-        where: { phoneNumber },
-        include: {
-          farmerProfile: {
-            include: {
-              landHoldings: true,
-              crops: true,
-            }
-          },
-          credits: true,
-        }
+      // 4. Log successful authentication
+      this.logger.log('🔄 Logging activity...');
+      await this.logActivity(user.id, 'FIREBASE_LOGIN', {
+        source: 'FIREBASE_AUTH',
+        firebaseUID: decodedToken.uid,
+        isNewUser,
       });
 
+      const result = {
+        user,
+        token: jwtToken,
+        expires: tokenExpiration,
+        isNewUser,
+        firebaseUID: decodedToken.uid,
+      };
+
+      this.logger.log('✅ Firebase authentication completed successfully');
+      return result;
+
+    } catch (error) {
+      this.logger.error(`❌ Firebase token verification failed:`, error.message);
+      this.logger.error(`❌ Error details:`, error);
+      throw new HttpException(
+        error.message || 'Firebase authentication failed',
+        error.status || HttpStatus.UNAUTHORIZED
+      );
+    }
+  }
+
+  /**
+   * Create or update user from Firebase authentication
+   */
+  async createOrUpdateFirebaseUser(phoneNumber: string, firebaseUID: string, profileData?: CompleteProfileDto) {
+    try {
+      this.logger.log(`👤 Creating/updating Firebase user: ${phoneNumber}, UID: ${firebaseUID}`);
+
+      // Check if user exists by phone number
+      const existingUser = await this.prisma.$queryRaw`
+        SELECT * FROM app_auth."User" 
+        WHERE "phoneNumber" = ${phoneNumber}
+        LIMIT 1
+      ` as any[];
+
+      let user: any;
       let isNewUser = false;
 
-      if (!user) {
+      if (!existingUser || existingUser.length === 0) {
         // Create new user
         isNewUser = true;
-        user = await this.prisma.user.create({
-          data: {
-            phoneNumber,
-            name: profileData?.name || null,
-            role: 'FARMER',
-            // Create farmer profile if data provided
-            farmerProfile: profileData ? {
-              create: {
-                languagePref: profileData.languagePref || 'hi-IN',
-                location: profileData.location || null,
-                gpsLat: profileData.gpsLat || null,
-                gpsLong: profileData.gpsLong || null,
-                landHoldings: profileData.landHoldings ? {
-                  create: profileData.landHoldings
-                } : undefined,
-                crops: profileData.crops ? {
-                  create: profileData.crops
-                } : undefined,
-              }
-            } : undefined,
-            // Give welcome credits
-            credits: {
-              create: {
-                balance: 100,
-                currency: 'CREDITS',
-              }
-            }
-          },
-          include: {
-            farmerProfile: {
-              include: {
-                landHoldings: true,
-                crops: true,
-              }
-            },
-            credits: true,
-          }
-        });
+        const userId = this.generateId();
+        
+        // Insert user
+        await this.prisma.$executeRaw`
+          INSERT INTO app_auth."User" (id, "phoneNumber", name, role, "createdAt", "updatedAt")
+          VALUES (${userId}, ${phoneNumber}, ${profileData?.name || null}, 'FARMER', NOW(), NOW())
+        `;
 
-        // Log user registration
-        await this.prisma.activityLog.create({
-          data: {
-            userId: user.id,
-            action: 'USER_REGISTERED',
-            metadata: {
-              source: 'OTP_VERIFICATION',
-              phoneNumber,
-              hasProfile: !!profileData?.name,
-              landCount: profileData?.landHoldings?.length || 0,
-              cropCount: profileData?.crops?.length || 0,
-            }
-          }
-        });
+        // Create credit balance
+        const creditId = this.generateId();
+        await this.prisma.$executeRaw`
+          INSERT INTO app_auth."CreditBalance" (id, "userId", balance, currency)
+          VALUES (${creditId}, ${userId}, 100, 'CREDITS')
+        `;
 
-        this.logger.log(`✅ New user created: ${phoneNumber}`);
-      } else {
-        // Update existing user if new data provided
-        if (profileData?.name && !user.name) {
-          user = await this.prisma.user.update({
-            where: { id: user.id },
-            data: { 
-              name: profileData.name,
-              farmerProfile: user.farmerProfile ? {
-                update: {
-                  languagePref: profileData.languagePref,
-                  location: profileData.location,
-                  gpsLat: profileData.gpsLat,
-                  gpsLong: profileData.gpsLong,
-                }
-              } : {
-                create: {
-                  languagePref: profileData.languagePref || 'hi-IN',
-                  location: profileData.location || null,
-                  gpsLat: profileData.gpsLat || null,
-                  gpsLong: profileData.gpsLong || null,
-                }
-              }
-            },
-            include: {
-              farmerProfile: {
-                include: {
-                  landHoldings: true,
-                  crops: true,
-                }
-              },
-              credits: true,
-            }
-          });
+        // Create farmer profile if data provided
+        if (profileData && (profileData.name || profileData.location)) {
+          const profileId = this.generateId();
+          await this.prisma.$executeRaw`
+            INSERT INTO app_auth."FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
+            VALUES (${profileId}, ${userId}, ${profileData.languagePref || 'hi-IN'}, ${profileData.location || null}, ${profileData.gpsLat || null}, ${profileData.gpsLong || null}, NOW(), NOW())
+          `;
         }
 
-        this.logger.log(`✅ Existing user updated: ${phoneNumber}`);
+        user = { 
+          id: userId, 
+          phoneNumber, 
+          name: profileData?.name || null, 
+          role: 'FARMER',
+          firebaseUID,
+          isNewUser: true 
+        };
+        
+        this.logger.log(`✅ New Firebase user created: ${phoneNumber}`);
+      } else {
+        // Update existing user
+        user = existingUser[0];
+        user.firebaseUID = firebaseUID;
+        user.isNewUser = false;
+        
+        // Update name if provided and not already set
+        if (profileData?.name && !user.name) {
+          await this.prisma.$executeRaw`
+            UPDATE app_auth."User" SET name = ${profileData.name}, "updatedAt" = NOW()
+            WHERE id = ${user.id}
+          `;
+          user.name = profileData.name;
+        }
+        
+        this.logger.log(`✅ Existing Firebase user found: ${phoneNumber}`);
       }
 
       return { user, isNewUser };
     } catch (error) {
-      this.logger.error(`❌ Failed to create/update user ${phoneNumber}:`, error);
-      throw new HttpException('User creation/update failed', HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error(`❌ Failed to create/update Firebase user ${phoneNumber}:`, error);
+      throw new HttpException('Firebase user creation/update failed', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
+
   /**
-   * Complete user profile with additional information
+   * Validate JWT token and return user data
    */
-  async completeProfile(userId: string, profileData: CompleteProfileDto) {
+  async validateJwtToken(token: string) {
     try {
-      this.logger.log(`📝 Completing profile for user: ${userId}`);
+      this.logger.log(`🔍 Validating JWT token`);
+      
+      // Verify and decode the JWT token
+      const payload = this.jwtService.verifyToken(token);
+      
+      // Get user from database
+      const users = await this.prisma.$queryRaw`
+        SELECT * FROM app_auth."User" 
+        WHERE id = ${payload.sub}
+        LIMIT 1
+      ` as any[];
 
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: { farmerProfile: true }
-      });
-
-      if (!user) {
-        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      if (!users || users.length === 0) {
+        throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
       }
 
-      // Update user name
-      const updatedUser = await this.prisma.user.update({
-        where: { id: userId },
-        data: {
-          name: profileData.name,
-          farmerProfile: user.farmerProfile ? {
-            update: {
-              languagePref: profileData.languagePref,
-              location: profileData.location,
-              gpsLat: profileData.gpsLat,
-              gpsLong: profileData.gpsLong,
-            }
-          } : {
-            create: {
-              languagePref: profileData.languagePref || 'hi-IN',
-              location: profileData.location || null,
-              gpsLat: profileData.gpsLat || null,
-              gpsLong: profileData.gpsLong || null,
-            }
-          }
-        },
-        include: {
-          farmerProfile: {
-            include: {
-              landHoldings: true,
-              crops: true,
-            }
-          },
-          credits: true,
-        }
-      });
-
-      // Add land holdings if provided
-      if (profileData.landHoldings && profileData.landHoldings.length > 0) {
-        await Promise.all(
-          profileData.landHoldings.map(land =>
-            this.prisma.landHolding.create({
-              data: {
-                farmerId: updatedUser.farmerProfile!.id,
-                ...land,
-              }
-            })
-          )
-        );
-      }
-
-      // Add crops if provided
-      if (profileData.crops && profileData.crops.length > 0) {
-        await Promise.all(
-          profileData.crops.map(crop =>
-            this.prisma.cropRecord.create({
-              data: {
-                farmerId: updatedUser.farmerProfile!.id,
-                ...crop,
-              }
-            })
-          )
-        );
-      }
-
-      // Log profile completion
-      await this.prisma.activityLog.create({
-        data: {
-          userId,
-          action: 'PROFILE_COMPLETED',
-          metadata: {
-            landCount: profileData.landHoldings?.length || 0,
-            cropCount: profileData.crops?.length || 0,
-          }
-        }
-      });
-
-      this.logger.log(`✅ Profile completed for user: ${userId}`);
-      return updatedUser;
-
+      const user = users[0];
+      this.logger.log(`✅ JWT token validated for user: ${user.phoneNumber}`);
+      
+      return {
+        user,
+        payload,
+      };
     } catch (error) {
-      this.logger.error(`❌ Profile completion failed for user ${userId}:`, error);
-      throw new HttpException('Profile completion failed', HttpStatus.BAD_REQUEST);
+      this.logger.error(`❌ JWT token validation failed:`, error);
+      throw new HttpException(
+        error.message || 'Invalid token',
+        HttpStatus.UNAUTHORIZED
+      );
     }
   }
 
   /**
-   * Get user profile by ID
+   * Refresh JWT token
    */
+  async refreshJwtToken(oldToken: string) {
+    try {
+      this.logger.log(`🔄 Refreshing JWT token`);
+      
+      const newToken = this.jwtService.refreshToken(oldToken);
+      const tokenExpiration = this.jwtService.getTokenExpiration(newToken);
+      
+      return {
+        token: newToken,
+        expires: tokenExpiration,
+      };
+    } catch (error) {
+      this.logger.error(`❌ JWT token refresh failed:`, error);
+      throw new HttpException(
+        'Token refresh failed',
+        HttpStatus.UNAUTHORIZED
+      );
+    }
+  }
+
+  // ===== PROFILE METHODS =====
+
   async getUserProfile(userId: string) {
     try {
       const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: {
-          farmerProfile: {
-            include: {
-              landHoldings: true,
-              crops: true,
-              soilTests: {
-                take: 5,
-                orderBy: { createdAt: 'desc' }
-              },
-              queries: {
-                take: 10,
-                orderBy: { createdAt: 'desc' }
-              },
-            }
-          },
-          credits: true,
-          activityLogs: {
-            take: 20,
-            orderBy: { createdAt: 'desc' }
-          }
-        }
+        where: { id: userId }
       });
 
       if (!user) {
         throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      return user;
+      const farmerProfile = await this.prisma.farmerProfile.findUnique({
+        where: { userId }
+      });
+
+      // Combine user and farmer profile data
+      return {
+        ...user,
+        ...farmerProfile
+      };
     } catch (error) {
       this.logger.error(`❌ Failed to get user profile ${userId}:`, error);
       throw error;
     }
   }
 
-  // ===== SESSION MANAGEMENT METHODS =====
-
-  /**
-   * Generate session token
-   */
-  generateSessionToken(): string {
-    return Math.random().toString(36).substring(2) + Date.now().toString(36);
-  }
-
-  /**
-   * Create user session
-   */
-  async createSession(userId: string, deviceInfo?: string, ipAddress?: string) {
+  async updateUserProfile(userId: string, profileData: CompleteProfileDto) {
     try {
-      const sessionToken = this.generateSessionToken();
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+      this.logger.log(`📝 Updating profile for user: ${userId}`);
 
-      const session = await this.prisma.session.create({
-        data: {
-          userId,
-          sessionToken,
-          expires: expiresAt,
-        }
-      });
-
-      // Log session creation
-      await this.prisma.activityLog.create({
-        data: {
-          userId,
-          action: 'SESSION_CREATED',
-          metadata: {
-            sessionId: session.id,
-            deviceInfo,
-            ipAddress,
-          }
-        }
-      });
-
-      return session;
-    } catch (error) {
-      this.logger.error(`❌ Failed to create session for user ${userId}:`, error);
-      throw new HttpException('Session creation failed', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  /**
-   * Validate session token
-   */
-  async validateSession(sessionToken: string) {
-    try {
-      const session = await this.prisma.session.findUnique({
-        where: { sessionToken },
-        include: {
-          user: {
-            include: {
-              farmerProfile: true,
-              credits: true,
-            }
-          }
-        }
-      });
-
-      if (!session) {
-        return null;
-      }
-
-      // Check if session is expired
-      if (new Date() > session.expires) {
-        // Clean up expired session
-        await this.prisma.session.delete({
-          where: { id: session.id }
-        });
-        return null;
-      }
-
-      return session;
-    } catch (error) {
-      this.logger.error('❌ Session validation failed:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Invalidate session (logout)
-   */
-  async logout(sessionToken: string): Promise<boolean> {
-    try {
-      const session = await this.prisma.session.findUnique({
-        where: { sessionToken }
-      });
-
-      if (session) {
-        await this.prisma.session.delete({
-          where: { sessionToken }
-        });
-
-        // Log logout
-        await this.prisma.activityLog.create({
-          data: {
-            userId: session.userId,
-            action: 'USER_LOGOUT',
-            metadata: {
-              sessionId: session.id,
-            }
+      // Update user name if provided
+      if (profileData.name) {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { 
+            name: profileData.name,
+            updatedAt: new Date()
           }
         });
-
-        this.logger.log(`✅ User logged out successfully`);
       }
 
-      return true;
-    } catch (error) {
-      this.logger.error('❌ Logout failed:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Get user sessions
-   */
-  async getUserSessions(userId: string) {
-    try {
-      return await this.prisma.session.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' }
-      });
-    } catch (error) {
-      this.logger.error(`❌ Failed to get user sessions for ${userId}:`, error);
-      throw error;
-    }
-  }
-
-  // ===== FARMER QUERY METHODS =====
-
-  /**
-   * Save farmer query for AI context
-   */
-  async saveFarmerQuery(userId: string, queryText: string, answerText?: string, metadata?: any) {
-    try {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: { farmerProfile: true }
-      });
-
-      if (!user?.farmerProfile) {
-        throw new HttpException('Farmer profile not found', HttpStatus.NOT_FOUND);
-      }
-
-      const query = await this.prisma.farmerQuery.create({
-        data: {
-          farmerId: user.farmerProfile.id,
-          queryText,
-          answerText,
-          language: user.farmerProfile.languagePref || 'hi-IN',
-          source: 'text',
-          metadata,
-        }
-      });
-
-      return query;
-    } catch (error) {
-      this.logger.error(`❌ Failed to save farmer query for user ${userId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Get farmer query history
-   */
-  async getFarmerQueries(userId: string, limit: number = 20) {
-    try {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: { farmerProfile: true }
-      });
-
-      if (!user?.farmerProfile) {
-        throw new HttpException('Farmer profile not found', HttpStatus.NOT_FOUND);
-      }
-
-      return await this.prisma.farmerQuery.findMany({
-        where: { farmerId: user.farmerProfile.id },
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-      });
-    } catch (error) {
-      this.logger.error(`❌ Failed to get farmer queries for user ${userId}:`, error);
-      throw error;
-    }
-  }
-
-  // ===== CREDIT MANAGEMENT =====
-
-  /**
-   * Add credits to user account
-   */
-  async addCredits(userId: string, amount: number, description?: string) {
-    try {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: { credits: true }
-      });
-
-      if (!user) {
-        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-      }
-
-      // Update credit balance
-      const updatedCredits = await this.prisma.creditBalance.update({
-        where: { userId },
-        data: {
-          balance: { increment: amount },
-          transactions: {
-            create: {
-              amount,
-              type: amount > 0 ? 'RECHARGE' : 'PURCHASE',
-              description: description || `Credits ${amount > 0 ? 'added' : 'deducted'}`,
-            }
-          }
-        },
-        include: { transactions: true }
-      });
-
-      this.logger.log(`💰 Credits updated for user ${userId}: ${amount}`);
-      return updatedCredits;
-    } catch (error) {
-      this.logger.error(`❌ Failed to add credits for user ${userId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Check if user has sufficient credits
-   */
-  async hasSufficientCredits(userId: string, requiredAmount: number): Promise<boolean> {
-    try {
-      const credits = await this.prisma.creditBalance.findUnique({
+      // Check if farmer profile exists
+      const existingProfile = await this.prisma.farmerProfile.findUnique({
         where: { userId }
       });
 
-      return credits ? credits.balance >= requiredAmount : false;
+      const farmerProfileData = {
+        languagePref: profileData.languagePref || 'hi-IN',
+        location: profileData.location || null,
+        gpsLat: profileData.gpsLat || null,
+        gpsLong: profileData.gpsLong || null,
+        updatedAt: new Date()
+      };
+
+      if (!existingProfile) {
+        // Create new farmer profile
+        await this.prisma.farmerProfile.create({
+          data: {
+            id: this.generateId(),
+            userId,
+            ...farmerProfileData,
+            createdAt: new Date()
+          }
+        });
+      } else {
+        // Update existing farmer profile
+        await this.prisma.farmerProfile.update({
+          where: { userId },
+          data: farmerProfileData
+        });
+      }
+
+      this.logger.log(`✅ Profile updated for user: ${userId}`);
+      return await this.getUserProfile(userId);
+    } catch (error) {
+      this.logger.error(`❌ Failed to update profile for user ${userId}:`, error);
+      throw new HttpException('Profile update failed', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ===== UTILITY METHODS =====
+
+  private generateId(): string {
+    const timestamp = Date.now().toString(36);
+    const randomPart = Math.random().toString(36).substring(2);
+    return `clx${timestamp}${randomPart}`;
+  }
+
+  async logActivity(userId: string, action: string, metadata?: any) {
+    try {
+      const logId = this.generateId();
+      // Use Prisma client instead of raw SQL for proper JSON handling
+      await this.prisma.activityLog.create({
+        data: {
+          id: logId,
+          userId,
+          action,
+          metadata,
+          createdAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.error(`❌ Failed to log activity for user ${userId}:`, error);
+    }
+  }
+
+  async hasSufficientCredits(userId: string, requiredAmount: number): Promise<boolean> {
+    try {
+      const credits = await this.prisma.$queryRaw`
+        SELECT balance FROM app_auth."CreditBalance" WHERE "userId" = ${userId}
+        LIMIT 1
+      ` as any[];
+
+      if (!credits || credits.length === 0) {
+        return false;
+      }
+
+      return credits[0].balance >= requiredAmount;
     } catch (error) {
       this.logger.error(`❌ Failed to check credits for user ${userId}:`, error);
       return false;
     }
   }
 
-  // ===== UTILITY METHODS =====
+  // ===== DEBUG METHODS =====
 
-  /**
-   * Clean up expired OTPs (call this periodically)
-   */
-  cleanupExpiredOTPs(): void {
-    const now = new Date();
-    for (const [phoneNumber, otpData] of otpStore.entries()) {
-      if (now > otpData.expiresAt) {
-        otpStore.delete(phoneNumber);
-      }
-    }
-    this.logger.log(`🧹 Cleaned up expired OTPs`);
+  getDebugInfo() {
+    return {
+      timestamp: new Date().toISOString(),
+      service: 'Firebase + OTP Auth Service',
+    };
   }
 
-  /**
-   * Get application statistics
-   */
   async getAppStats() {
     try {
-      const totalUsers = await this.prisma.user.count();
-      const activeSessions = await this.prisma.session.count({
-        where: {
-          expires: { gt: new Date() }
-        }
-      });
-      const totalQueries = await this.prisma.farmerQuery.count();
-      const totalCreditsIssued = await this.prisma.creditBalance.aggregate({
-        _sum: { balance: true }
-      });
+      const totalUsers = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM app_auth."User"` as any[];
+      const totalCredits = await this.prisma.$queryRaw`SELECT SUM(balance) as total FROM app_auth."CreditBalance"` as any[];
 
       return {
-        totalUsers,
-        activeSessions,
-        totalQueries,
-        totalCreditsIssued: totalCreditsIssued._sum.balance || 0,
+        totalUsers: Number(totalUsers[0]?.count || 0),
+        totalCreditsIssued: Number(totalCredits[0]?.total || 0),
       };
     } catch (error) {
       this.logger.error('❌ Failed to get app stats:', error);
-      throw error;
+      return {
+        totalUsers: 0,
+        totalCreditsIssued: 0,
+      };
     }
   }
 }
