@@ -1,6 +1,7 @@
-// src/auth/auth.controller.ts - FIXED VERSION
+// src/auth/auth.controller.ts - COMPLETE FIREBASE VERSION
 import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { AuthService, CompleteProfileDto } from './auth.service';
+import { FirebaseService } from '../firebase/firebase.service';
 
 interface SendOTPRequest {
   phoneNumber: string;
@@ -16,19 +17,33 @@ interface VerifyOTPRequest {
   gpsLong?: number;
 }
 
+interface VerifyFirebaseRequest {
+  idToken: string;
+  phoneNumber?: string;
+  uid: string;
+  name?: string;
+  languagePref?: string;
+  location?: string;
+  gpsLat?: number;
+  gpsLong?: number;
+}
+
 @Controller('auth')
 export class AuthController {
   private readonly logger = new Logger(AuthController.name);
 
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private firebaseService: FirebaseService,
+  ) {}
 
   @Get('health')
   async healthCheck() {
     return {
       success: true,
-      message: 'Auth service is running',
+      message: 'Firebase Auth service is running',
       timestamp: new Date().toISOString(),
-      service: 'agricultural-ai-auth-service',
+      service: 'agricultural-ai-firebase-auth-service',
     };
   }
 
@@ -39,11 +54,64 @@ export class AuthController {
     
     return {
       success: true,
-      timestamp: new Date().toISOString(),
+      debugTimestamp: new Date().toISOString(),
       ...debugInfo,
       ...appStats,
     };
   }
+
+  // ===== FIREBASE AUTHENTICATION =====
+
+  @Post('verify-firebase')
+  async verifyFirebase(@Body() verifyFirebaseRequest: VerifyFirebaseRequest) {
+    const { idToken, phoneNumber, uid, name, languagePref, location, gpsLat, gpsLong } = verifyFirebaseRequest;
+
+    if (!idToken || !uid) {
+      throw new HttpException('Firebase ID token and UID are required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      this.logger.log(`🔥 Processing Firebase authentication for UID: ${uid}`);
+
+      const profileData: CompleteProfileDto = {
+        name,
+        languagePref: languagePref || 'hi-IN',
+        location,
+        gpsLat,
+        gpsLong,
+      };
+
+      const result = await this.authService.verifyFirebaseToken(idToken, profileData);
+
+      this.logger.log(`✅ Firebase authentication successful for: ${result.user.phoneNumber}`);
+
+      return {
+        success: true,
+        message: 'Firebase authentication successful',
+        user: {
+          id: result.user.id,
+          phoneNumber: result.user.phoneNumber,
+          name: result.user.name,
+          role: result.user.role,
+          firebaseUID: result.firebaseUID,
+          isNewUser: result.isNewUser,
+        },
+        session: {
+          token: result.session.sessionToken,
+          expires: result.session.expires,
+        }
+      };
+
+    } catch (error) {
+      this.logger.error('❌ Firebase authentication error:', error);
+      throw new HttpException(
+        error.message || 'Firebase authentication failed',
+        error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  // ===== FALLBACK OTP AUTHENTICATION =====
 
   @Post('send-otp')
   async sendOTP(@Body() sendOTPRequest: SendOTPRequest) {
@@ -60,7 +128,7 @@ export class AuthController {
       
       return {
         success: true,
-        message: 'OTP sent successfully',
+        message: 'OTP sent successfully (fallback method)',
       };
     } catch (error) {
       this.logger.error(`❌ Failed to send OTP to ${phoneNumber}:`, error);
@@ -96,7 +164,7 @@ export class AuthController {
 
       return {
         success: true,
-        message: 'Login successful',
+        message: 'OTP verification successful (fallback method)',
         user: {
           id: user.id,
           phoneNumber: user.phoneNumber,
@@ -118,6 +186,8 @@ export class AuthController {
       );
     }
   }
+
+  // ===== SESSION MANAGEMENT =====
 
   @Post('logout')
   async logout(@Body() logoutRequest: { sessionToken: string }) {
@@ -191,6 +261,28 @@ export class AuthController {
     } catch (error) {
       this.logger.error('❌ Profile fetch error:', error);
       throw new HttpException('Failed to get profile', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('update-profile')
+  async updateProfile(@Body() updateRequest: { userId: string; profileData: CompleteProfileDto }) {
+    const { userId, profileData } = updateRequest;
+
+    if (!userId || !profileData) {
+      throw new HttpException('User ID and profile data are required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const updatedProfile = await this.authService.updateUserProfile(userId, profileData);
+      
+      return {
+        success: true,
+        message: 'Profile updated successfully',
+        profile: updatedProfile,
+      };
+    } catch (error) {
+      this.logger.error('❌ Profile update error:', error);
+      throw new HttpException('Failed to update profile', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }
