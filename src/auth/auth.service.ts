@@ -2,23 +2,28 @@
 import { Injectable, HttpException, HttpStatus, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { JwtService } from '@nestjs/jwt';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { FirebaseService } from '../firebase/firebase.service'; // Fixed import
 import { Farmer } from '../farmers/entities/farmer.entity';
+import { UserSession } from './entities/user-session.entity';
 import { CompleteProfileDto } from './dto/auth.dto';
 
 @Injectable()
 export class AuthService {
   constructor(
     private firebaseService: FirebaseService, // Fixed service name
+    private jwtService: JwtService,
     @InjectRepository(Farmer)
     private farmerRepository: Repository<Farmer>,
+    @InjectRepository(UserSession)
+    private sessionRepository: Repository<UserSession>,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
   // Verify Firebase ID token and handle user creation/update
-  async verifyFirebaseToken(idToken: string) {
+  async verifyFirebaseToken(idToken: string, deviceInfo?: string, ipAddress?: string) {
     try {
       this.logger.info('Starting token verification process', {
         context: 'AuthService',
@@ -58,9 +63,45 @@ export class AuthService {
         });
       }
 
+      // Generate JWT token
+      const jwtPayload = {
+        sub: decodedToken.uid,
+        firebaseUid: decodedToken.uid,
+        phone: decodedToken.phone_number,
+        email: decodedToken.email,
+        role: 'farmer',
+        hasProfile: !!farmer?.name,
+        village: farmer?.village,
+        language: farmer?.language || 'hindi',
+      };
+
+      const jwtToken = this.jwtService.sign(jwtPayload);
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 7); // 7 days from now
+
+      // Save session to database
+      const session = this.sessionRepository.create({
+        firebaseUid: decodedToken.uid,
+        jwtToken,
+        deviceInfo: deviceInfo || 'Unknown Device',
+        ipAddress: ipAddress || 'Unknown IP',
+        expiresAt,
+        isActive: true,
+      });
+      await this.sessionRepository.save(session);
+
+      this.logger.info('JWT session created', {
+        context: 'AuthService',
+        firebaseUid: decodedToken.uid,
+        sessionId: session.id,
+      });
+
       return {
         success: true,
         message: 'Authentication successful',
+        accessToken: jwtToken,
+        tokenType: 'Bearer',
+        expiresIn: 7 * 24 * 60 * 60, // 7 days in seconds
         user: {
           uid: decodedToken.uid,
           phone: decodedToken.phone_number,
@@ -256,6 +297,107 @@ export class AuthService {
       this.logger.error('Failed to generate custom token', {
         context: 'AuthService',
         method: 'generateInternalJWT',
+        firebaseUid,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  // Validate JWT session
+  async validateSession(jwtToken: string): Promise<UserSession | null> {
+    try {
+      const session = await this.sessionRepository.findOne({
+        where: { 
+          jwtToken,
+          isActive: true
+        },
+        relations: ['farmer']
+      });
+
+      if (!session) {
+        return null;
+      }
+
+      // Check if session is expired
+      if (session.expiresAt < new Date()) {
+        await this.invalidateSession(session.id);
+        return null;
+      }
+
+      return session;
+    } catch (error) {
+      this.logger.error('Session validation failed', {
+        context: 'AuthService',
+        method: 'validateSession',
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  // Invalidate a specific session
+  async invalidateSession(sessionId: string): Promise<void> {
+    try {
+      await this.sessionRepository.update(
+        { id: sessionId },
+        { isActive: false }
+      );
+
+      this.logger.info('Session invalidated', {
+        context: 'AuthService',
+        method: 'invalidateSession',
+        sessionId,
+      });
+    } catch (error) {
+      this.logger.error('Failed to invalidate session', {
+        context: 'AuthService',
+        method: 'invalidateSession',
+        sessionId,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  // Invalidate all sessions for a user
+  async invalidateAllUserSessions(firebaseUid: string): Promise<void> {
+    try {
+      await this.sessionRepository.update(
+        { firebaseUid, isActive: true },
+        { isActive: false }
+      );
+
+      this.logger.info('All user sessions invalidated', {
+        context: 'AuthService',
+        method: 'invalidateAllUserSessions',
+        firebaseUid,
+      });
+    } catch (error) {
+      this.logger.error('Failed to invalidate user sessions', {
+        context: 'AuthService',
+        method: 'invalidateAllUserSessions',
+        firebaseUid,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  // Get active sessions for a user
+  async getUserSessions(firebaseUid: string): Promise<UserSession[]> {
+    try {
+      return await this.sessionRepository.find({
+        where: { 
+          firebaseUid,
+          isActive: true
+        },
+        order: { createdAt: 'DESC' }
+      });
+    } catch (error) {
+      this.logger.error('Failed to get user sessions', {
+        context: 'AuthService',
+        method: 'getUserSessions',
         firebaseUid,
         error: error.message,
       });

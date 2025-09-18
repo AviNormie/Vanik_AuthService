@@ -8,11 +8,12 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { FirebaseAuthGuard } from './guards/firebase-auth.guard';
 import { Farmer } from '../farmers/entities/farmer.entity';
+import { UserSession } from './entities/user-session.entity';
 import { FirebaseModule } from '../firebase/firebase.module'; // Import FirebaseModule
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Farmer]),
+    TypeOrmModule.forFeature([Farmer, UserSession]),
     PassportModule.register({ defaultStrategy: 'firebase-custom' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
