@@ -219,18 +219,23 @@ export class AuthService {
 
   async getUserProfile(userId: string) {
     try {
-      const users = await this.prisma.$queryRaw`
-        SELECT u.*, fp.* FROM app_auth."User" u 
-        LEFT JOIN app_auth."FarmerProfile" fp ON u.id = fp."userId"
-        WHERE u.id = ${userId}
-        LIMIT 1
-      ` as any[];
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId }
+      });
 
-      if (!users || users.length === 0) {
+      if (!user) {
         throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      return users[0];
+      const farmerProfile = await this.prisma.farmerProfile.findUnique({
+        where: { userId }
+      });
+
+      // Combine user and farmer profile data
+      return {
+        ...user,
+        ...farmerProfile
+      };
     } catch (error) {
       this.logger.error(`❌ Failed to get user profile ${userId}:`, error);
       throw error;
@@ -241,33 +246,46 @@ export class AuthService {
     try {
       this.logger.log(`📝 Updating profile for user: ${userId}`);
 
+      // Update user name if provided
       if (profileData.name) {
-        await this.prisma.$executeRaw`
-          UPDATE app_auth."User" SET name = ${profileData.name}, "updatedAt" = NOW()
-          WHERE id = ${userId}
-        `;
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { 
+            name: profileData.name,
+            updatedAt: new Date()
+          }
+        });
       }
 
-      const existingProfile = await this.prisma.$queryRaw`
-        SELECT * FROM app_auth."FarmerProfile" WHERE "userId" = ${userId} LIMIT 1
-      ` as any[];
+      // Check if farmer profile exists
+      const existingProfile = await this.prisma.farmerProfile.findUnique({
+        where: { userId }
+      });
 
-      if (!existingProfile || existingProfile.length === 0) {
-        const profileId = this.generateId();
-        await this.prisma.$executeRaw`
-          INSERT INTO app_auth."FarmerProfile" (id, "userId", "languagePref", location, "gpsLat", "gpsLong", "createdAt", "updatedAt")
-          VALUES (${profileId}, ${userId}, ${profileData.languagePref || 'hi-IN'}, ${profileData.location || null}, ${profileData.gpsLat || null}, ${profileData.gpsLong || null}, NOW(), NOW())
-        `;
+      const farmerProfileData = {
+        languagePref: profileData.languagePref || 'hi-IN',
+        location: profileData.location || null,
+        gpsLat: profileData.gpsLat || null,
+        gpsLong: profileData.gpsLong || null,
+        updatedAt: new Date()
+      };
+
+      if (!existingProfile) {
+        // Create new farmer profile
+        await this.prisma.farmerProfile.create({
+          data: {
+            id: this.generateId(),
+            userId,
+            ...farmerProfileData,
+            createdAt: new Date()
+          }
+        });
       } else {
-        await this.prisma.$executeRaw`
-          UPDATE app_auth."FarmerProfile" 
-          SET "languagePref" = ${profileData.languagePref || 'hi-IN'},
-              location = ${profileData.location || null},
-              "gpsLat" = ${profileData.gpsLat || null},
-              "gpsLong" = ${profileData.gpsLong || null},
-              "updatedAt" = NOW()
-          WHERE "userId" = ${userId}
-        `;
+        // Update existing farmer profile
+        await this.prisma.farmerProfile.update({
+          where: { userId },
+          data: farmerProfileData
+        });
       }
 
       this.logger.log(`✅ Profile updated for user: ${userId}`);
@@ -289,10 +307,16 @@ export class AuthService {
   async logActivity(userId: string, action: string, metadata?: any) {
     try {
       const logId = this.generateId();
-      await this.prisma.$executeRaw`
-        INSERT INTO app_auth."ActivityLog" (id, "userId", action, metadata, "createdAt")
-        VALUES (${logId}, ${userId}, ${action}, ${JSON.stringify(metadata)}, NOW())
-      `;
+      // Use Prisma client instead of raw SQL for proper JSON handling
+      await this.prisma.activityLog.create({
+        data: {
+          id: logId,
+          userId,
+          action,
+          metadata,
+          createdAt: new Date(),
+        },
+      });
     } catch (error) {
       this.logger.error(`❌ Failed to log activity for user ${userId}:`, error);
     }
@@ -328,19 +352,16 @@ export class AuthService {
   async getAppStats() {
     try {
       const totalUsers = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM app_auth."User"` as any[];
-      const activeSessions = await this.prisma.$queryRaw`SELECT COUNT(*) as count FROM app_auth."Session" WHERE expires > NOW()` as any[];
       const totalCredits = await this.prisma.$queryRaw`SELECT SUM(balance) as total FROM app_auth."CreditBalance"` as any[];
 
       return {
         totalUsers: Number(totalUsers[0]?.count || 0),
-        activeSessions: Number(activeSessions[0]?.count || 0),
         totalCreditsIssued: Number(totalCredits[0]?.total || 0),
       };
     } catch (error) {
       this.logger.error('❌ Failed to get app stats:', error);
       return {
         totalUsers: 0,
-        activeSessions: 0,
         totalCreditsIssued: 0,
       };
     }

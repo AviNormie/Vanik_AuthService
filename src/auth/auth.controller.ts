@@ -161,12 +161,7 @@ export class AuthController {
     };
   }
 
-  // Legacy endpoint for backward compatibility
-  @Post('validate-session')
-  async validateSession(@Body() validateRequest: { sessionToken: string }) {
-    // Redirect to validate-token for JWT-based validation
-    return this.validateToken({ token: validateRequest.sessionToken });
-  }
+
 
 
 
