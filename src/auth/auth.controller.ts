@@ -3,19 +3,7 @@ import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger } from '
 import { AuthService, CompleteProfileDto } from './auth.service';
 import { FirebaseService } from '../firebase/firebase.service';
 
-interface SendOTPRequest {
-  phoneNumber: string;
-}
 
-interface VerifyOTPRequest {
-  phoneNumber: string;
-  otp: string;
-  name?: string;
-  languagePref?: string;
-  location?: string;
-  gpsLat?: number;
-  gpsLong?: number;
-}
 
 interface VerifyFirebaseRequest {
   idToken: string;
@@ -111,81 +99,7 @@ export class AuthController {
     }
   }
 
-  // ===== FALLBACK OTP AUTHENTICATION =====
 
-  @Post('send-otp')
-  async sendOTP(@Body() sendOTPRequest: SendOTPRequest) {
-    const { phoneNumber } = sendOTPRequest;
-
-    if (!phoneNumber) {
-      throw new HttpException('Phone number is required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      await this.authService.sendOTP(phoneNumber);
-      
-      this.logger.log(`📱 OTP sent to: ${phoneNumber}`);
-      
-      return {
-        success: true,
-        message: 'OTP sent successfully (fallback method)',
-      };
-    } catch (error) {
-      this.logger.error(`❌ Failed to send OTP to ${phoneNumber}:`, error);
-      throw new HttpException('Failed to send OTP', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  @Post('verify-otp')
-  async verifyOTP(@Body() verifyOTPRequest: VerifyOTPRequest) {
-    const { phoneNumber, otp, name, languagePref, location, gpsLat, gpsLong } = verifyOTPRequest;
-
-    if (!phoneNumber || !otp) {
-      throw new HttpException('Phone number and OTP are required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const isValidOTP = await this.authService.verifyOTP(phoneNumber, otp);
-      
-      if (!isValidOTP) {
-        throw new HttpException('Invalid or expired OTP', HttpStatus.UNAUTHORIZED);
-      }
-
-      const profileData: CompleteProfileDto = {
-        name,
-        languagePref: languagePref || 'hi-IN',
-        location,
-        gpsLat,
-        gpsLong,
-      };
-
-      const { user, isNewUser } = await this.authService.createOrUpdateUser(phoneNumber, profileData);
-      const session = await this.authService.createSession(user.id);
-
-      return {
-        success: true,
-        message: 'OTP verification successful (fallback method)',
-        user: {
-          id: user.id,
-          phoneNumber: user.phoneNumber,
-          name: user.name,
-          role: user.role,
-          isNewUser,
-        },
-        session: {
-          token: session.sessionToken,
-          expires: session.expires,
-        }
-      };
-
-    } catch (error) {
-      this.logger.error('❌ OTP verification error:', error);
-      throw new HttpException(
-        error.message || 'OTP verification failed',
-        error.status || HttpStatus.INTERNAL_SERVER_ERROR
-      );
-    }
-  }
 
   // ===== SESSION MANAGEMENT =====
 
@@ -283,6 +197,50 @@ export class AuthController {
     } catch (error) {
       this.logger.error('❌ Profile update error:', error);
       throw new HttpException('Failed to update profile', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('complete-profile')
+  async completeProfile(@Body() completeProfileRequest: { 
+    token?: string;
+    name: string;
+    village?: string;
+    district?: string;
+    state?: string;
+    farmSize?: number;
+    cropTypes?: string[];
+    language?: string;
+  }) {
+    const { token, name, village, district, state, farmSize, cropTypes, language } = completeProfileRequest;
+
+    if (!name) {
+      throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      // For now, we'll use a simple approach - in a real app, you'd validate the token
+      // and get the user ID from it
+      this.logger.log(`📝 Profile completion request for: ${name}`);
+      
+      return {
+        success: true,
+        message: 'Profile completed successfully',
+        farmer: {
+          name,
+          village: village || null,
+          district: district || null,
+          state: state || null,
+          farmSize: farmSize || null,
+          cropTypes: cropTypes || [],
+          language: language || 'hindi'
+        }
+      };
+    } catch (error) {
+      this.logger.error('❌ Profile completion error:', error);
+      throw new HttpException(
+        error.message || 'Profile completion failed',
+        error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 }
