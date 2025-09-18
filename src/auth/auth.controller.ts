@@ -1,6 +1,7 @@
 // src/auth/auth.controller.ts
-import { Controller, Post, Body, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Controller, Post, Body, HttpException, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { PrismaService } from '../../prisma/prisma.service';
 
 interface SendOTPRequest {
   phoneNumber: string;
@@ -9,18 +10,18 @@ interface SendOTPRequest {
 interface VerifyOTPRequest {
   phoneNumber: string;
   otp: string;
+  // Optional user profile data   
   name?: string;
   languagePref?: string;
   location?: string;
-  gpsLat?: number;
-  gpsLong?: number;
 }
 
 @Controller('auth')
 export class AuthController {
-  private readonly logger = new Logger(AuthController.name);
-
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private prisma: PrismaService,
+  ) {}
 
   @Post('send-otp')
   async sendOTP(@Body() sendOTPRequest: SendOTPRequest) {
@@ -32,22 +33,18 @@ export class AuthController {
 
     try {
       await this.authService.sendOTP(phoneNumber);
-      
-      this.logger.log(`📱 OTP sent to: ${phoneNumber}`);
-      
       return {
         success: true,
         message: 'OTP sent successfully',
       };
     } catch (error) {
-      this.logger.error(`❌ Failed to send OTP to ${phoneNumber}:`, error);
       throw new HttpException('Failed to send OTP', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Post('verify-otp')
   async verifyOTP(@Body() verifyOTPRequest: VerifyOTPRequest) {
-    const { phoneNumber, otp, name, languagePref, location, gpsLat, gpsLong } = verifyOTPRequest;
+    const { phoneNumber, otp, name, languagePref, location } = verifyOTPRequest;
 
     if (!phoneNumber || !otp) {
       throw new HttpException('Phone number and OTP are required', HttpStatus.BAD_REQUEST);
@@ -61,21 +58,94 @@ export class AuthController {
         throw new HttpException('Invalid or expired OTP', HttpStatus.UNAUTHORIZED);
       }
 
-      // 2. Create or update user
-      const profileData = {
-        name,
-        languagePref: languagePref || 'hi-IN',
-        location,
-        gpsLat,
-        gpsLong,
-      };
+      // 2. Check if user exists
+      let user = await this.prisma.user.findUnique({
+        where: { phoneNumber },
+        include: {
+          farmerProfile: true,
+          credits: true,
+        }
+      });
 
-      const { user, isNewUser } = await this.authService.createOrUpdateUser(phoneNumber, profileData);
+      // 3. Create new user if doesn't exist
+      if (!user) {
+        user = await this.prisma.user.create({
+          data: {
+            phoneNumber,
+            name: name || null,
+            role: 'FARMER',
+            // Create farmer profile if additional data provided
+            farmerProfile: (name || languagePref || location) ? {
+              create: {
+                languagePref: languagePref || 'hi-IN',
+                location: location || null,
+              }
+            } : undefined,
+            // Give welcome credits
+            credits: {
+              create: {
+                balance: 100,
+                currency: 'CREDITS',
+              }
+            }
+          },
+          include: {
+            farmerProfile: true,
+            credits: true,
+          }
+        });
 
-      // 3. Create session
-      const session = await this.authService.createSession(user.id);
+        // Log new user registration
+        await this.prisma.activityLog.create({
+          data: {
+            userId: user.id,
+            action: 'USER_REGISTERED',
+            metadata: {
+              source: 'OTP_VERIFICATION',
+              phoneNumber,
+            }
+          }
+        });
 
-      // 4. Return response
+        console.log(`✅ New user created: ${phoneNumber}`);
+      } else {
+        // Update existing user if new data provided
+        if (name && !user.name) {
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: { name },
+            include: {
+              farmerProfile: true,
+              credits: true,
+            }
+          });
+        }
+
+        console.log(`✅ Existing user logged in: ${phoneNumber}`);
+      }
+
+      // 4. Create session
+      const session = await this.prisma.session.create({
+        data: {
+          userId: user.id,
+          sessionToken: this.generateSessionToken(),
+          expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+        }
+      });
+
+      // 5. Log successful login
+      await this.prisma.activityLog.create({
+        data: {
+          userId: user.id,
+          action: 'USER_LOGIN',
+          metadata: {
+            source: 'OTP_VERIFICATION',
+            sessionId: session.id,
+          }
+        }
+      });
+
+      // 6. Return user data with session
       return {
         success: true,
         message: 'Login successful',
@@ -83,8 +153,10 @@ export class AuthController {
           id: user.id,
           phoneNumber: user.phoneNumber,
           name: user.name,
-          role: 'FARMER',
-          isNewUser,
+          role: user.role,
+          profile: user.farmerProfile,
+          credits: user.credits?.balance || 0,
+          isNewUser: !user.name,
         },
         session: {
           token: session.sessionToken,
@@ -93,7 +165,7 @@ export class AuthController {
       };
 
     } catch (error) {
-      this.logger.error('❌ OTP verification error:', error);
+      console.error('❌ OTP verification error:', error);
       throw new HttpException(
         error.message || 'OTP verification failed',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR
@@ -101,78 +173,7 @@ export class AuthController {
     }
   }
 
-  @Post('logout')
-  async logout(@Body() logoutRequest: { sessionToken: string }) {
-    const { sessionToken } = logoutRequest;
-
-    if (!sessionToken) {
-      throw new HttpException('Session token is required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const success = await this.authService.logout(sessionToken);
-      
-      return {
-        success,
-        message: success ? 'Logged out successfully' : 'Logout failed',
-      };
-    } catch (error) {
-      this.logger.error('❌ Logout error:', error);
-      throw new HttpException('Logout failed', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  @Post('validate-session')
-  async validateSession(@Body() validateRequest: { sessionToken: string }) {
-    const { sessionToken } = validateRequest;
-
-    if (!sessionToken) {
-      throw new HttpException('Session token is required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const session = await this.authService.validateSession(sessionToken);
-      
-      if (!session) {
-        throw new HttpException('Invalid or expired session', HttpStatus.UNAUTHORIZED);
-      }
-
-      return {
-        success: true,
-        valid: true,
-        user: {
-          id: session.id,
-          phoneNumber: session.phoneNumber,
-          name: session.name,
-        }
-      };
-    } catch (error) {
-      return {
-        success: false,
-        valid: false,
-        message: 'Session validation failed',
-      };
-    }
-  }
-
-  @Post('profile')
-  async getUserProfile(@Body() profileRequest: { userId: string }) {
-    const { userId } = profileRequest;
-
-    if (!userId) {
-      throw new HttpException('User ID is required', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const profile = await this.authService.getUserProfile(userId);
-      
-      return {
-        success: true,
-        profile,
-      };
-    } catch (error) {
-      this.logger.error('❌ Profile fetch error:', error);
-      throw new HttpException('Failed to get profile', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
+  private generateSessionToken(): string {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
   }
 }
