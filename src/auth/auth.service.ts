@@ -1,318 +1,432 @@
 // src/auth/auth.service.ts
-import { Injectable, HttpException, HttpStatus, Inject } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
-import { Logger } from 'winston';
-import { FirebaseService } from '../firebase/firebase.service'; // Fixed import
-import { Farmer } from '../farmers/entities/farmer.entity';
-import { UserSession } from './entities/user-session.entity';
-import { CompleteProfileDto } from './dto/auth.dto';
+import { PrismaService } from '../../prisma/prisma.service';
+
+// In-memory OTP storage for hackathon (use Redis in production)
+const otpStore = new Map<string, { otp: string; expiresAt: Date }>();
+
+interface CompleteProfileDto {
+  name: string;
+  languagePref?: string;
+  location?: string;
+  gpsLat?: number;
+  gpsLong?: number;
+  landHoldings?: {
+    sizeAcre?: number;
+    irrigation?: string;
+    location?: string;
+  }[];
+  crops?: {
+    cropType: string;
+    variety?: string;
+    season?: string;
+    stage?: 'PLANNING' | 'SOWN' | 'VEGETATIVE' | 'FLOWERING' | 'FRUITING' | 'HARVEST' | 'POSTHARVEST';
+  }[];
+}
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
-    private firebaseService: FirebaseService, // Fixed service name
-    private jwtService: JwtService,
-    @InjectRepository(Farmer)
-    private farmerRepository: Repository<Farmer>,
-    @InjectRepository(UserSession)
-    private sessionRepository: Repository<UserSession>,
-    @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private prisma: PrismaService,
+    private jwtService?: JwtService,
   ) {}
 
-  // Verify Firebase ID token and handle user creation/update
-  async verifyFirebaseToken(idToken: string, deviceInfo?: string, ipAddress?: string) {
+  // ===== OTP AUTHENTICATION METHODS =====
+
+  /**
+   * Send OTP to phone number
+   */
+  async sendOTP(phoneNumber: string): Promise<void> {
     try {
-      this.logger.info('Starting token verification process', {
-        context: 'AuthService',
-        method: 'verifyFirebaseToken',
-      });
+      this.logger.log(`📱 Sending OTP to: ${phoneNumber}`);
 
-      const decodedToken = await this.firebaseService.verifyIdToken(idToken);
+      // Generate 6-digit OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+      // Store OTP in memory (use Redis in production)
+      otpStore.set(phoneNumber, { otp, expiresAt });
+
+      // For hackathon: Log the OTP (in production: send via SMS)
+      console.log(`🔑 OTP for ${phoneNumber}: ${otp} (expires in 5 minutes)`);
       
-      // Find or create farmer
-      let farmer = await this.farmerRepository.findOne({
-        where: { firebaseUid: decodedToken.uid }
-      });
+      // TODO: Integrate with SMS service
+      // await this.smsService.sendSMS(phoneNumber, `Your agricultural AI assistant OTP: ${otp}. Valid for 5 minutes.`);
 
-      if (!farmer && decodedToken.phone_number) {
-        // Create new farmer profile
-        farmer = this.farmerRepository.create({
-          firebaseUid: decodedToken.uid,
-          phoneNumber: decodedToken.phone_number,
-          lastLoginAt: new Date(),
-        });
-        farmer = await this.farmerRepository.save(farmer);
-        
-        this.logger.info('New farmer created', {
-          context: 'AuthService',
-          firebaseUid: decodedToken.uid,
-          phoneNumber: decodedToken.phone_number,
-        });
-      } else if (farmer) {
-        // Update last login
-        farmer.lastLoginAt = new Date();
-        await this.farmerRepository.save(farmer);
-        
-        this.logger.info('Existing farmer login updated', {
-          context: 'AuthService',
-          firebaseUid: decodedToken.uid,
-          phoneNumber: decodedToken.phone_number,
-        });
+      this.logger.log(`✅ OTP sent successfully to ${phoneNumber}`);
+    } catch (error) {
+      this.logger.error(`❌ Failed to send OTP to ${phoneNumber}:`, error);
+      throw new HttpException('Failed to send OTP', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Verify OTP and return validation result
+   */
+  async verifyOTP(phoneNumber: string, otp: string): Promise<boolean> {
+    try {
+      this.logger.log(`🔍 Verifying OTP for: ${phoneNumber}`);
+
+      const storedOTP = otpStore.get(phoneNumber);
+
+      if (!storedOTP) {
+        this.logger.warn(`❌ No OTP found for: ${phoneNumber}`);
+        return false;
       }
 
-      // Generate JWT token
-      const jwtPayload = {
-        sub: decodedToken.uid,
-        firebaseUid: decodedToken.uid,
-        phone: decodedToken.phone_number,
-        email: decodedToken.email,
-        role: 'farmer',
-        hasProfile: !!farmer?.name,
-        village: farmer?.village,
-        language: farmer?.language || 'hindi',
-      };
+      // Check if OTP is expired
+      if (new Date() > storedOTP.expiresAt) {
+        this.logger.warn(`⏰ OTP expired for: ${phoneNumber}`);
+        otpStore.delete(phoneNumber);
+        return false;
+      }
 
-      const jwtToken = this.jwtService.sign(jwtPayload);
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7); // 7 days from now
+      // Check if OTP matches
+      if (storedOTP.otp !== otp) {
+        this.logger.warn(`❌ Invalid OTP for: ${phoneNumber}`);
+        return false;
+      }
 
-      // Save session to database
-      const session = this.sessionRepository.create({
-        firebaseUid: decodedToken.uid,
-        jwtToken,
-        deviceInfo: deviceInfo || 'Unknown Device',
-        ipAddress: ipAddress || 'Unknown IP',
-        expiresAt,
-        isActive: true,
+      // OTP is valid - clean up
+      otpStore.delete(phoneNumber);
+      this.logger.log(`✅ OTP verified successfully for: ${phoneNumber}`);
+      return true;
+
+    } catch (error) {
+      this.logger.error(`❌ OTP verification error for ${phoneNumber}:`, error);
+      return false;
+    }
+  }
+
+  // ===== USER MANAGEMENT METHODS =====
+
+  /**
+   * Create or update user after successful OTP verification
+   */
+  async createOrUpdateUser(phoneNumber: string, profileData?: CompleteProfileDto) {
+    try {
+      this.logger.log(`👤 Creating/updating user: ${phoneNumber}`);
+
+      // Check if user exists
+      let user = await this.prisma.user.findUnique({
+        where: { phoneNumber },
+        include: {
+          farmerProfile: {
+            include: {
+              landHoldings: true,
+              crops: true,
+            }
+          },
+          credits: true,
+        }
       });
-      await this.sessionRepository.save(session);
 
-      this.logger.info('JWT session created', {
-        context: 'AuthService',
-        firebaseUid: decodedToken.uid,
-        sessionId: session.id,
+      let isNewUser = false;
+
+      if (!user) {
+        // Create new user
+        isNewUser = true;
+        user = await this.prisma.user.create({
+          data: {
+            phoneNumber,
+            name: profileData?.name || null,
+            role: 'FARMER',
+            // Create farmer profile if data provided
+            farmerProfile: profileData ? {
+              create: {
+                languagePref: profileData.languagePref || 'hi-IN',
+                location: profileData.location || null,
+                gpsLat: profileData.gpsLat || null,
+                gpsLong: profileData.gpsLong || null,
+                landHoldings: profileData.landHoldings ? {
+                  create: profileData.landHoldings
+                } : undefined,
+                crops: profileData.crops ? {
+                  create: profileData.crops
+                } : undefined,
+              }
+            } : undefined,
+            // Give welcome credits
+            credits: {
+              create: {
+                balance: 100,
+                currency: 'CREDITS',
+              }
+            }
+          },
+          include: {
+            farmerProfile: {
+              include: {
+                landHoldings: true,
+                crops: true,
+              }
+            },
+            credits: true,
+          }
+        });
+
+        // Log user registration
+        await this.prisma.activityLog.create({
+          data: {
+            userId: user.id,
+            action: 'USER_REGISTERED',
+            metadata: {
+              source: 'OTP_VERIFICATION',
+              phoneNumber,
+              hasProfile: !!profileData?.name,
+              landCount: profileData?.landHoldings?.length || 0,
+              cropCount: profileData?.crops?.length || 0,
+            }
+          }
+        });
+
+        this.logger.log(`✅ New user created: ${phoneNumber}`);
+      } else {
+        // Update existing user if new data provided
+        if (profileData?.name && !user.name) {
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: { 
+              name: profileData.name,
+              farmerProfile: user.farmerProfile ? {
+                update: {
+                  languagePref: profileData.languagePref,
+                  location: profileData.location,
+                  gpsLat: profileData.gpsLat,
+                  gpsLong: profileData.gpsLong,
+                }
+              } : {
+                create: {
+                  languagePref: profileData.languagePref || 'hi-IN',
+                  location: profileData.location || null,
+                  gpsLat: profileData.gpsLat || null,
+                  gpsLong: profileData.gpsLong || null,
+                }
+              }
+            },
+            include: {
+              farmerProfile: {
+                include: {
+                  landHoldings: true,
+                  crops: true,
+                }
+              },
+              credits: true,
+            }
+          });
+        }
+
+        this.logger.log(`✅ Existing user updated: ${phoneNumber}`);
+      }
+
+      return { user, isNewUser };
+    } catch (error) {
+      this.logger.error(`❌ Failed to create/update user ${phoneNumber}:`, error);
+      throw new HttpException('User creation/update failed', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Complete user profile with additional information
+   */
+  async completeProfile(userId: string, profileData: CompleteProfileDto) {
+    try {
+      this.logger.log(`📝 Completing profile for user: ${userId}`);
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { farmerProfile: true }
       });
 
-      return {
-        success: true,
-        message: 'Authentication successful',
-        accessToken: jwtToken,
-        tokenType: 'Bearer',
-        expiresIn: 7 * 24 * 60 * 60, // 7 days in seconds
-        user: {
-          uid: decodedToken.uid,
-          phone: decodedToken.phone_number,
-          email: decodedToken.email,
-          verified: decodedToken.phone_number_verified || decodedToken.email_verified,
-          hasProfile: !!farmer?.name,
+      if (!user) {
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      }
+
+      // Update user name
+      const updatedUser = await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          name: profileData.name,
+          farmerProfile: user.farmerProfile ? {
+            update: {
+              languagePref: profileData.languagePref,
+              location: profileData.location,
+              gpsLat: profileData.gpsLat,
+              gpsLong: profileData.gpsLong,
+            }
+          } : {
+            create: {
+              languagePref: profileData.languagePref || 'hi-IN',
+              location: profileData.location || null,
+              gpsLat: profileData.gpsLat || null,
+              gpsLong: profileData.gpsLong || null,
+            }
+          }
         },
-        farmer: farmer ? {
-          firebaseUid: farmer.firebaseUid,
-          phoneNumber: farmer.phoneNumber,
-          name: farmer.name,
-          village: farmer.village,
-          district: farmer.district,
-          cropTypes: farmer.cropTypes ? JSON.parse(farmer.cropTypes) : [],
-          farmSize: farmer.farmSize,
-          language: farmer.language,
-        } : null,
-      };
-    } catch (error) {
-      this.logger.error('Token verification failed', {
-        context: 'AuthService',
-        method: 'verifyFirebaseToken',
-        error: error.message,
+        include: {
+          farmerProfile: {
+            include: {
+              landHoldings: true,
+              crops: true,
+            }
+          },
+          credits: true,
+        }
       });
-      
-      throw new HttpException(
-        `Authentication failed: ${error.message}`,
-        HttpStatus.UNAUTHORIZED
-      );
+
+      // Add land holdings if provided
+      if (profileData.landHoldings && profileData.landHoldings.length > 0) {
+        await Promise.all(
+          profileData.landHoldings.map(land =>
+            this.prisma.landHolding.create({
+              data: {
+                farmerId: updatedUser.farmerProfile!.id,
+                ...land,
+              }
+            })
+          )
+        );
+      }
+
+      // Add crops if provided
+      if (profileData.crops && profileData.crops.length > 0) {
+        await Promise.all(
+          profileData.crops.map(crop =>
+            this.prisma.cropRecord.create({
+              data: {
+                farmerId: updatedUser.farmerProfile!.id,
+                ...crop,
+              }
+            })
+          )
+        );
+      }
+
+      // Log profile completion
+      await this.prisma.activityLog.create({
+        data: {
+          userId,
+          action: 'PROFILE_COMPLETED',
+          metadata: {
+            landCount: profileData.landHoldings?.length || 0,
+            cropCount: profileData.crops?.length || 0,
+          }
+        }
+      });
+
+      this.logger.log(`✅ Profile completed for user: ${userId}`);
+      return updatedUser;
+
+    } catch (error) {
+      this.logger.error(`❌ Profile completion failed for user ${userId}:`, error);
+      throw new HttpException('Profile completion failed', HttpStatus.BAD_REQUEST);
     }
   }
 
-  // Complete farmer profile
-  async completeProfile(firebaseUid: string, profileData: CompleteProfileDto) {
+  /**
+   * Get user profile by ID
+   */
+  async getUserProfile(userId: string) {
     try {
-      this.logger.info('Starting profile completion', {
-        context: 'AuthService',
-        method: 'completeProfile',
-        firebaseUid,
-        village: profileData.village,
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: {
+          farmerProfile: {
+            include: {
+              landHoldings: true,
+              crops: true,
+              soilTests: {
+                take: 5,
+                orderBy: { createdAt: 'desc' }
+              },
+              queries: {
+                take: 10,
+                orderBy: { createdAt: 'desc' }
+              },
+            }
+          },
+          credits: true,
+          activityLogs: {
+            take: 20,
+            orderBy: { createdAt: 'desc' }
+          }
+        }
       });
 
-      const farmer = await this.farmerRepository.findOne({
-        where: { firebaseUid }
-      });
-
-      if (!farmer) {
-        this.logger.error('Farmer not found for profile completion', {
-          context: 'AuthService',
-          firebaseUid,
-        });
-        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
+      if (!user) {
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      // Update farmer profile
-      farmer.name = profileData.name;
-      farmer.village = profileData.village ?? farmer.village;
-      farmer.district = profileData.district ?? farmer.district;
-      farmer.state = profileData.state ?? farmer.state;
-      farmer.cropTypes = profileData.cropTypes ? JSON.stringify(profileData.cropTypes) : farmer.cropTypes;
-      farmer.farmSize = profileData.farmSize ?? farmer.farmSize;
-      farmer.language = profileData.language || 'hindi';
-
-      const updatedFarmer = await this.farmerRepository.save(farmer);
-
-      // Update Firebase custom claims
-      await this.firebaseService.setCustomUserClaims(firebaseUid, {
-        hasProfile: true,
-        farmerType: 'registered',
-        village: profileData.village,
-        language: profileData.language || 'hindi',
-      });
-
-      this.logger.info('Profile completed successfully', {
-        context: 'AuthService',
-        firebaseUid,
-        name: profileData.name,
-        village: profileData.village,
-      });
-
-      return {
-        success: true,
-        message: 'Profile completed successfully',
-        farmer: {
-          firebaseUid: updatedFarmer.firebaseUid,
-          phoneNumber: updatedFarmer.phoneNumber,
-          name: updatedFarmer.name,
-          village: updatedFarmer.village,
-          district: updatedFarmer.district,
-          state: updatedFarmer.state,
-          cropTypes: updatedFarmer.cropTypes ? JSON.parse(updatedFarmer.cropTypes) : [],
-          farmSize: updatedFarmer.farmSize,
-          language: updatedFarmer.language,
-        }
-      };
+      return user;
     } catch (error) {
-      this.logger.error('Profile completion failed', {
-        context: 'AuthService',
-        method: 'completeProfile',
-        firebaseUid,
-        error: error.message,
-      });
-      
-      throw new HttpException(
-        `Profile update failed: ${error.message}`,
-        HttpStatus.BAD_REQUEST
-      );
-    }
-  }
-
-  // Get farmer profile
-  async getFarmerProfile(firebaseUid: string) {
-    try {
-      this.logger.info('Fetching farmer profile', {
-        context: 'AuthService',
-        method: 'getFarmerProfile',
-        firebaseUid,
-      });
-
-      const farmer = await this.farmerRepository.findOne({
-        where: { firebaseUid }
-      });
-
-      if (!farmer) {
-        this.logger.error('Farmer profile not found', {
-          context: 'AuthService',
-          firebaseUid,
-        });
-        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
-      }
-
-      return {
-        success: true,
-        farmer: {
-          firebaseUid: farmer.firebaseUid,
-          phoneNumber: farmer.phoneNumber,
-          name: farmer.name,
-          village: farmer.village,
-          district: farmer.district,
-          state: farmer.state,
-          cropTypes: farmer.cropTypes ? JSON.parse(farmer.cropTypes) : [],
-          farmSize: farmer.farmSize,
-          language: farmer.language,
-          lastLoginAt: farmer.lastLoginAt,
-          createdAt: farmer.createdAt,
-        }
-      };
-    } catch (error) {
-      this.logger.error('Failed to fetch farmer profile', {
-        context: 'AuthService',
-        method: 'getFarmerProfile',
-        firebaseUid,
-        error: error.message,
-      });
+      this.logger.error(`❌ Failed to get user profile ${userId}:`, error);
       throw error;
     }
   }
 
-  // Generate custom JWT for internal services (optional)
-  async generateInternalJWT(firebaseUid: string) {
+  // ===== SESSION MANAGEMENT METHODS =====
+
+  /**
+   * Generate session token
+   */
+  generateSessionToken(): string {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
+  }
+
+  /**
+   * Create user session
+   */
+  async createSession(userId: string, deviceInfo?: string, ipAddress?: string) {
     try {
-      this.logger.info('Generating custom token', {
-        context: 'AuthService',
-        method: 'generateInternalJWT',
-        firebaseUid,
+      const sessionToken = this.generateSessionToken();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+      const session = await this.prisma.session.create({
+        data: {
+          userId,
+          sessionToken,
+          expires: expiresAt,
+        }
       });
 
-      const farmer = await this.farmerRepository.findOne({
-        where: { firebaseUid }
+      // Log session creation
+      await this.prisma.activityLog.create({
+        data: {
+          userId,
+          action: 'SESSION_CREATED',
+          metadata: {
+            sessionId: session.id,
+            deviceInfo,
+            ipAddress,
+          }
+        }
       });
 
-      if (!farmer) {
-        throw new HttpException('Farmer not found', HttpStatus.NOT_FOUND);
-      }
-
-      // Create custom token with farmer data
-      const customClaims = {
-        role: 'farmer',
-        hasProfile: !!farmer.name,
-        village: farmer.village,
-        language: farmer.language || 'hindi',
-        farmerId: farmer.firebaseUid,
-      };
-
-      const customToken = await this.firebaseService.createCustomToken(firebaseUid, customClaims);
-
-      return {
-        success: true,
-        customToken,
-        expiresIn: 3600, // 1 hour
-      };
+      return session;
     } catch (error) {
-      this.logger.error('Failed to generate custom token', {
-        context: 'AuthService',
-        method: 'generateInternalJWT',
-        firebaseUid,
-        error: error.message,
-      });
-      throw error;
+      this.logger.error(`❌ Failed to create session for user ${userId}:`, error);
+      throw new HttpException('Session creation failed', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
-  // Validate JWT session
-  async validateSession(jwtToken: string): Promise<UserSession | null> {
+  /**
+   * Validate session token
+   */
+  async validateSession(sessionToken: string) {
     try {
-      const session = await this.sessionRepository.findOne({
-        where: { 
-          jwtToken,
-          isActive: true
-        },
-        relations: ['farmer']
+      const session = await this.prisma.session.findUnique({
+        where: { sessionToken },
+        include: {
+          user: {
+            include: {
+              farmerProfile: true,
+              credits: true,
+            }
+          }
+        }
       });
 
       if (!session) {
@@ -320,87 +434,225 @@ export class AuthService {
       }
 
       // Check if session is expired
-      if (session.expiresAt < new Date()) {
-        await this.invalidateSession(session.id);
+      if (new Date() > session.expires) {
+        // Clean up expired session
+        await this.prisma.session.delete({
+          where: { id: session.id }
+        });
         return null;
       }
 
       return session;
     } catch (error) {
-      this.logger.error('Session validation failed', {
-        context: 'AuthService',
-        method: 'validateSession',
-        error: error.message,
-      });
+      this.logger.error('❌ Session validation failed:', error);
       return null;
     }
   }
 
-  // Invalidate a specific session
-  async invalidateSession(sessionId: string): Promise<void> {
+  /**
+   * Invalidate session (logout)
+   */
+  async logout(sessionToken: string): Promise<boolean> {
     try {
-      await this.sessionRepository.update(
-        { id: sessionId },
-        { isActive: false }
-      );
+      const session = await this.prisma.session.findUnique({
+        where: { sessionToken }
+      });
 
-      this.logger.info('Session invalidated', {
-        context: 'AuthService',
-        method: 'invalidateSession',
-        sessionId,
+      if (session) {
+        await this.prisma.session.delete({
+          where: { sessionToken }
+        });
+
+        // Log logout
+        await this.prisma.activityLog.create({
+          data: {
+            userId: session.userId,
+            action: 'USER_LOGOUT',
+            metadata: {
+              sessionId: session.id,
+            }
+          }
+        });
+
+        this.logger.log(`✅ User logged out successfully`);
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error('❌ Logout failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get user sessions
+   */
+  async getUserSessions(userId: string) {
+    try {
+      return await this.prisma.session.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' }
       });
     } catch (error) {
-      this.logger.error('Failed to invalidate session', {
-        context: 'AuthService',
-        method: 'invalidateSession',
-        sessionId,
-        error: error.message,
-      });
+      this.logger.error(`❌ Failed to get user sessions for ${userId}:`, error);
       throw error;
     }
   }
 
-  // Invalidate all sessions for a user
-  async invalidateAllUserSessions(firebaseUid: string): Promise<void> {
-    try {
-      await this.sessionRepository.update(
-        { firebaseUid, isActive: true },
-        { isActive: false }
-      );
+  // ===== FARMER QUERY METHODS =====
 
-      this.logger.info('All user sessions invalidated', {
-        context: 'AuthService',
-        method: 'invalidateAllUserSessions',
-        firebaseUid,
+  /**
+   * Save farmer query for AI context
+   */
+  async saveFarmerQuery(userId: string, queryText: string, answerText?: string, metadata?: any) {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { farmerProfile: true }
       });
+
+      if (!user?.farmerProfile) {
+        throw new HttpException('Farmer profile not found', HttpStatus.NOT_FOUND);
+      }
+
+      const query = await this.prisma.farmerQuery.create({
+        data: {
+          farmerId: user.farmerProfile.id,
+          queryText,
+          answerText,
+          language: user.farmerProfile.languagePref || 'hi-IN',
+          source: 'text',
+          metadata,
+        }
+      });
+
+      return query;
     } catch (error) {
-      this.logger.error('Failed to invalidate user sessions', {
-        context: 'AuthService',
-        method: 'invalidateAllUserSessions',
-        firebaseUid,
-        error: error.message,
-      });
+      this.logger.error(`❌ Failed to save farmer query for user ${userId}:`, error);
       throw error;
     }
   }
 
-  // Get active sessions for a user
-  async getUserSessions(firebaseUid: string): Promise<UserSession[]> {
+  /**
+   * Get farmer query history
+   */
+  async getFarmerQueries(userId: string, limit: number = 20) {
     try {
-      return await this.sessionRepository.find({
-        where: { 
-          firebaseUid,
-          isActive: true
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { farmerProfile: true }
+      });
+
+      if (!user?.farmerProfile) {
+        throw new HttpException('Farmer profile not found', HttpStatus.NOT_FOUND);
+      }
+
+      return await this.prisma.farmerQuery.findMany({
+        where: { farmerId: user.farmerProfile.id },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+    } catch (error) {
+      this.logger.error(`❌ Failed to get farmer queries for user ${userId}:`, error);
+      throw error;
+    }
+  }
+
+  // ===== CREDIT MANAGEMENT =====
+
+  /**
+   * Add credits to user account
+   */
+  async addCredits(userId: string, amount: number, description?: string) {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { credits: true }
+      });
+
+      if (!user) {
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      }
+
+      // Update credit balance
+      const updatedCredits = await this.prisma.creditBalance.update({
+        where: { userId },
+        data: {
+          balance: { increment: amount },
+          transactions: {
+            create: {
+              amount,
+              type: amount > 0 ? 'RECHARGE' : 'PURCHASE',
+              description: description || `Credits ${amount > 0 ? 'added' : 'deducted'}`,
+            }
+          }
         },
-        order: { createdAt: 'DESC' }
+        include: { transactions: true }
       });
+
+      this.logger.log(`💰 Credits updated for user ${userId}: ${amount}`);
+      return updatedCredits;
     } catch (error) {
-      this.logger.error('Failed to get user sessions', {
-        context: 'AuthService',
-        method: 'getUserSessions',
-        firebaseUid,
-        error: error.message,
+      this.logger.error(`❌ Failed to add credits for user ${userId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if user has sufficient credits
+   */
+  async hasSufficientCredits(userId: string, requiredAmount: number): Promise<boolean> {
+    try {
+      const credits = await this.prisma.creditBalance.findUnique({
+        where: { userId }
       });
+
+      return credits ? credits.balance >= requiredAmount : false;
+    } catch (error) {
+      this.logger.error(`❌ Failed to check credits for user ${userId}:`, error);
+      return false;
+    }
+  }
+
+  // ===== UTILITY METHODS =====
+
+  /**
+   * Clean up expired OTPs (call this periodically)
+   */
+  cleanupExpiredOTPs(): void {
+    const now = new Date();
+    for (const [phoneNumber, otpData] of otpStore.entries()) {
+      if (now > otpData.expiresAt) {
+        otpStore.delete(phoneNumber);
+      }
+    }
+    this.logger.log(`🧹 Cleaned up expired OTPs`);
+  }
+
+  /**
+   * Get application statistics
+   */
+  async getAppStats() {
+    try {
+      const totalUsers = await this.prisma.user.count();
+      const activeSessions = await this.prisma.session.count({
+        where: {
+          expires: { gt: new Date() }
+        }
+      });
+      const totalQueries = await this.prisma.farmerQuery.count();
+      const totalCreditsIssued = await this.prisma.creditBalance.aggregate({
+        _sum: { balance: true }
+      });
+
+      return {
+        totalUsers,
+        activeSessions,
+        totalQueries,
+        totalCreditsIssued: totalCreditsIssued._sum.balance || 0,
+      };
+    } catch (error) {
+      this.logger.error('❌ Failed to get app stats:', error);
       throw error;
     }
   }
