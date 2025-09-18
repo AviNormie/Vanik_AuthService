@@ -14,7 +14,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Farmer, UserSession]),
+    TypeOrmModule.forFeature([Farmer, UserSession]),  
     PassportModule.register({ defaultStrategy: 'firebase-custom' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
