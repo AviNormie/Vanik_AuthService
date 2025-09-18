@@ -3,9 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-  schemas  = ["app_auth"]
+provider = "postgresql"
+url      = env("DATABASE_URL")
+schemas  = ["app_auth"]
 }
 
 model User {
@@ -19,15 +19,7 @@ model User {
   @@schema("app_auth")
 }
 
-model Session {
-  id           String   @id @default(cuid())
-  userId       String
-  sessionToken String   @unique
-  expires      DateTime
-  createdAt    DateTime @default(now())
 
-  @@schema("app_auth")
-}
 
 model CreditBalance {
   id       String @id @default(cuid())
