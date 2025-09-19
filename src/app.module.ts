@@ -14,9 +14,11 @@ import { mkdirSync } from 'fs';
 
 // Ensure logs directory exists
 try {
-  mkdirSync('logs', { recursive: true });
+  const logsDir = process.env.NODE_ENV === 'production' ? '/tmp/logs' : 'logs';
+  mkdirSync(logsDir, { recursive: true });
 } catch (error) {
-  // Directory already exists
+  // Directory already exists or permission issue
+  console.warn('Could not create logs directory:', error.message);
 }
 
 @Module({
@@ -36,7 +38,7 @@ try {
           ),
         }),
         new winston.transports.File({
-          filename: 'logs/error.log',
+          filename: process.env.NODE_ENV === 'production' ? '/tmp/logs/error.log' : 'logs/error.log',
           level: 'error',
           format: winston.format.combine(
             winston.format.timestamp(),
@@ -44,7 +46,7 @@ try {
           ),
         }),
         new winston.transports.File({
-          filename: 'logs/combined.log',
+          filename: process.env.NODE_ENV === 'production' ? '/tmp/logs/combined.log' : 'logs/combined.log',
           format: winston.format.combine(
             winston.format.timestamp(),
             winston.format.json(),
@@ -54,10 +56,10 @@ try {
     }),
     TypeOrmModule.forRoot({
       type: 'sqlite',
-      database: 'agricultural_platform.db',
+      database: process.env.NODE_ENV === 'production' ? '/tmp/agricultural_platform.db' : 'agricultural_platform.db',
       entities: [join(__dirname, '**', '*.entity.{ts,js}')],
       synchronize: true, // Only for development
-      logging: true, // Log SQL queries
+      logging: process.env.NODE_ENV !== 'production', // Log SQL queries only in development
     }),
     FirebaseModule,
     AuthModule,
