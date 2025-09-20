@@ -195,7 +195,6 @@ export class AuthService {
     }
   }
 
-
   /**
    * Validate JWT token and return user data
    */
@@ -316,7 +315,6 @@ export class AuthService {
         const farmerProfileData = {
           name: profileData.name,
           village: profileData.village,
-          district: profileData.district,
           state: profileData.state,
           farmSize: profileData.farmSize,
           cropTypes: profileData.cropTypes,
@@ -346,10 +344,10 @@ export class AuthService {
           });
         }
       } else if (user.role === 'RETAILER') {
-        // Handle retailer profile
-        const existingRetailerProfile = await this.prisma.retailerProfile.findUnique({
-          where: { userId }
-        });
+        // Handle retailer profile - use raw SQL since retailerProfile might not exist in generated types
+        const existingRetailerProfile = await this.prisma.$queryRaw`
+          SELECT * FROM app_auth."RetailerProfile" WHERE "userId" = ${userId} LIMIT 1
+        ` as any[];
 
         const retailerProfileData = {
           businessName: profileData.businessName,
@@ -364,23 +362,44 @@ export class AuthService {
           experience: profileData.experience,
           specialization: profileData.specialization,
           languagePref: profileData.languagePref || 'hindi',
-          updatedAt: new Date()
         };
 
-        if (!existingRetailerProfile) {
-          await this.prisma.retailerProfile.create({
-            data: {
-              id: this.generateId(),
-              userId,
-              ...retailerProfileData,
-              createdAt: new Date()
-            }
-          });
+        if (!existingRetailerProfile || existingRetailerProfile.length === 0) {
+          const profileId = this.generateId();
+          await this.prisma.$executeRaw`
+            INSERT INTO app_auth."RetailerProfile" (
+              id, "userId", "businessName", "ownerName", "businessType", 
+              address, city, state, pincode, "gstNumber", "licenseNumber", 
+              experience, specialization, "languagePref", "createdAt", "updatedAt"
+            )
+            VALUES (
+              ${profileId}, ${userId}, ${retailerProfileData.businessName}, 
+              ${retailerProfileData.ownerName}, ${retailerProfileData.businessType}, 
+              ${retailerProfileData.address}, ${retailerProfileData.city}, 
+              ${retailerProfileData.state}, ${retailerProfileData.pincode}, 
+              ${retailerProfileData.gstNumber}, ${retailerProfileData.licenseNumber}, 
+              ${retailerProfileData.experience}, ${retailerProfileData.specialization}, 
+              ${retailerProfileData.languagePref}, NOW(), NOW()
+            )
+          `;
         } else {
-          await this.prisma.retailerProfile.update({
-            where: { userId },
-            data: retailerProfileData
-          });
+          await this.prisma.$executeRaw`
+            UPDATE app_auth."RetailerProfile" SET
+              "businessName" = ${retailerProfileData.businessName},
+              "ownerName" = ${retailerProfileData.ownerName},
+              "businessType" = ${retailerProfileData.businessType},
+              address = ${retailerProfileData.address},
+              city = ${retailerProfileData.city},
+              state = ${retailerProfileData.state},
+              pincode = ${retailerProfileData.pincode},
+              "gstNumber" = ${retailerProfileData.gstNumber},
+              "licenseNumber" = ${retailerProfileData.licenseNumber},
+              experience = ${retailerProfileData.experience},
+              specialization = ${retailerProfileData.specialization},
+              "languagePref" = ${retailerProfileData.languagePref},
+              "updatedAt" = NOW()
+            WHERE "userId" = ${userId}
+          `;
         }
       }
 
@@ -506,6 +525,7 @@ export class AuthService {
       
       // Delete in correct order to respect foreign key constraints
       await this.prisma.$executeRaw`DELETE FROM app_auth."FarmerProfile"`;
+      await this.prisma.$executeRaw`DELETE FROM app_auth."RetailerProfile"`;
       await this.prisma.$executeRaw`DELETE FROM app_auth."CreditBalance"`;
       await this.prisma.$executeRaw`DELETE FROM app_auth."ActivityLog"`;
       await this.prisma.$executeRaw`DELETE FROM app_auth."User"`;
@@ -554,7 +574,6 @@ export class AuthService {
             fp.id as "profileId",
             fp.name as "farmerName",
             fp.village,
-            fp.district,
             fp.state,
             fp."farmSize",
             fp."cropTypes",
@@ -694,7 +713,7 @@ export class AuthService {
       });
       
       if (userRole === 'FARMER') {
-        // Create farmer profile with comprehensive data
+        // Create farmer profile with comprehensive data - removed district field
         const locationString = [testUserData.village, testUserData.district, testUserData.state]
           .filter(Boolean)
           .join(', ');
@@ -703,7 +722,6 @@ export class AuthService {
            data: {
              userId: user.id,
              location: locationString || testUserData.village || null,
-             district: testUserData.district || '',
              state: testUserData.state || '',
              farmSize: testUserData.farmSize || '1-2 acres',
              cropTypes: testUserData.cropTypes || 'Rice, Wheat',
@@ -714,24 +732,24 @@ export class AuthService {
            },
          });
       } else if (userRole === 'RETAILER') {
-        // Create retailer profile with comprehensive data
-        await this.prisma.retailerProfile.create({
-          data: {
-            userId: user.id,
-            businessName: testUserData.businessName || 'Test Agro Business',
-            ownerName: testUserData.name,
-            businessType: testUserData.businessType || 'RETAIL',
-            address: testUserData.address || 'Test Address',
-            city: testUserData.city || 'Test City',
-            state: testUserData.state || 'Test State',
-            pincode: testUserData.pincode || '123456',
-            gstNumber: testUserData.gstNumber || 'TEST123456789',
-            licenseNumber: testUserData.licenseNumber || 'LIC123456',
-            experience: testUserData.experience || '3-5 years',
-            specialization: testUserData.specialization || 'Seeds and Fertilizers',
-            languagePref: testUserData.language || 'hindi',
-          },
-        });
+        // Create retailer profile with comprehensive data using raw SQL
+        const profileId = this.generateId();
+        await this.prisma.$executeRaw`
+          INSERT INTO app_auth."RetailerProfile" (
+            id, "userId", "businessName", "ownerName", "businessType", 
+            address, city, state, pincode, "gstNumber", "licenseNumber", 
+            experience, specialization, "languagePref", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${profileId}, ${user.id}, ${testUserData.businessName || 'Test Agro Business'}, 
+            ${testUserData.name}, ${testUserData.businessType || 'RETAIL'}, 
+            ${testUserData.address || 'Test Address'}, ${testUserData.city || 'Test City'}, 
+            ${testUserData.state || 'Test State'}, ${testUserData.pincode || '123456'}, 
+            ${testUserData.gstNumber || 'TEST123456789'}, ${testUserData.licenseNumber || 'LIC123456'}, 
+            ${testUserData.experience || '3-5 years'}, ${testUserData.specialization || 'Seeds and Fertilizers'}, 
+            ${testUserData.language || 'hindi'}, NOW(), NOW()
+          )
+        `;
       }
       
       // Create credit balance
