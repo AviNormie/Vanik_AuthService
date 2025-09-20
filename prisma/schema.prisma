@@ -39,14 +39,44 @@ model ActivityLog {
 }
 
 model FarmerProfile {
-  id           String   @id @default(cuid())
-  userId       String   @unique
-  languagePref String?
-  location     String?
-  gpsLat       Float?
-  gpsLong      Float?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  name           String?
+  village        String?
+  district       String?
+  state          String?
+  farmSize       String?
+  cropTypes      String?
+  experience     String?
+  landOwnership  String?  // 'OWNED' | 'LEASED' | 'SHARED'
+  irrigationType String?  // 'RAIN_FED' | 'IRRIGATED' | 'MIXED'
+  languagePref   String?  // 'hindi' | 'english'
+  location       String?
+  gpsLat         Float?
+  gpsLong        Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@schema("app_auth")
+}
+
+model RetailerProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  businessName   String?
+  ownerName      String?
+  businessType   String?  // 'WHOLESALE' | 'RETAIL' | 'BOTH'
+  address        String?
+  city           String?
+  state          String?
+  pincode        String?
+  gstNumber      String?
+  licenseNumber  String?
+  experience     String?
+  specialization String?
+  languagePref   String?  // 'hindi' | 'english'
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@schema("app_auth")
 }
