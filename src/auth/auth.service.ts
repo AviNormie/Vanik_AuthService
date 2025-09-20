@@ -385,4 +385,63 @@ export class AuthService {
       };
     }
   }
+
+  /**
+   * Get all users with their profile data
+   */
+  async getAllUsers() {
+    try {
+      this.logger.log('📋 Fetching all users from database');
+      
+      const users = await this.prisma.$queryRaw`
+        SELECT 
+          u.id,
+          u."phoneNumber",
+          u.name,
+          u.role,
+          u."createdAt",
+          u."updatedAt",
+          fp."languagePref",
+          fp.location,
+          fp."gpsLat",
+          fp."gpsLong",
+          cb.balance as credit_balance
+        FROM app_auth."User" u
+        LEFT JOIN app_auth."FarmerProfile" fp ON u.id = fp."userId"
+        LEFT JOIN app_auth."CreditBalance" cb ON u.id = cb."userId"
+        ORDER BY u."createdAt" DESC
+      `;
+      
+      this.logger.log(`✅ Retrieved ${(users as any[]).length} users`);
+      return users;
+    } catch (error) {
+      this.logger.error('❌ Error fetching all users:', error);
+      throw new HttpException('Failed to fetch users', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Delete all users and related data (DANGEROUS - use with caution)
+   */
+  async deleteAllUsers() {
+    try {
+      this.logger.warn('⚠️ DANGER: Deleting ALL users and related data');
+      
+      // Delete in correct order to respect foreign key constraints
+      await this.prisma.$executeRaw`DELETE FROM app_auth."FarmerProfile"`;
+      await this.prisma.$executeRaw`DELETE FROM app_auth."CreditBalance"`;
+      await this.prisma.$executeRaw`DELETE FROM app_auth."ActivityLog"`;
+      await this.prisma.$executeRaw`DELETE FROM app_auth."User"`;
+      
+      this.logger.log('✅ All users and related data deleted successfully');
+      return {
+        success: true,
+        message: 'All users and related data deleted successfully',
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      this.logger.error('❌ Error deleting all users:', error);
+      throw new HttpException('Failed to delete all users', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }
