@@ -55,11 +55,12 @@ try {
       ],
     }),
     TypeOrmModule.forRoot({
-      type: 'sqlite',
-      database: process.env.NODE_ENV === 'production' ? '/tmp/agricultural_platform.db' : 'agricultural_platform.db',
+      type: 'postgres',
+      url: process.env.DATABASE_URL,
       entities: [join(__dirname, '**', '*.entity.{ts,js}')],
-      synchronize: true, // Only for development
+      synchronize: false, // Never use synchronize in production
       logging: process.env.NODE_ENV !== 'production', // Log SQL queries only in development
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     }),
     FirebaseModule,
     AuthModule,
