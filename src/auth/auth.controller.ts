@@ -1,5 +1,5 @@
 // src/auth/auth.controller.ts - COMPLETE FIREBASE VERSION
-import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger, Delete } from '@nestjs/common';
 import { AuthService, CompleteProfileDto } from './auth.service';
 import { FirebaseService } from '../firebase/firebase.service';
 
@@ -307,6 +307,45 @@ export class AuthController {
       this.logger.error('❌ Profile completion error:', error);
       throw new HttpException(
         error.message || 'Profile completion failed',
+        error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('users')
+  async getAllUsers() {
+    try {
+      this.logger.log('📋 Fetching all users request received');
+      const users = await this.authService.getAllUsers();
+      const usersArray = users as any[];
+      
+      return {
+        success: true,
+        message: 'Users fetched successfully',
+        data: usersArray,
+        count: usersArray.length,
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      this.logger.error('❌ Get all users error:', error);
+      throw new HttpException(
+        error.message || 'Failed to fetch users',
+        error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Delete('users/all')
+  async deleteAllUsers() {
+    try {
+      this.logger.warn('⚠️ Delete all users request received - DANGEROUS OPERATION');
+      const result = await this.authService.deleteAllUsers();
+      
+      return result;
+    } catch (error) {
+      this.logger.error('❌ Delete all users error:', error);
+      throw new HttpException(
+        error.message || 'Failed to delete all users',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
