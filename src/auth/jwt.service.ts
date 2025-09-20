@@ -83,7 +83,7 @@ export class JwtService {
       
       const currentTime = Math.floor(Date.now() / 1000);
       return decoded.exp < currentTime;
-    } catch (error) {
+    } catch {
       return true;
     }
   }
@@ -97,7 +97,7 @@ export class JwtService {
       if (!decoded || !decoded.exp) return null;
       
       return new Date(decoded.exp * 1000);
-    } catch (error) {
+    } catch {
       return null;
     }
   }

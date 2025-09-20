@@ -1,5 +1,5 @@
 // src/auth/auth.controller.ts - COMPLETE FIREBASE VERSION
-import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger, Delete } from '@nestjs/common';
+import { Controller, Post, Get, Body, HttpException, HttpStatus, Logger, Delete, Param } from '@nestjs/common';
 import { AuthService, CompleteProfileDto } from './auth.service';
 import { FirebaseService } from '../firebase/firebase.service';
 
@@ -225,26 +225,53 @@ export class AuthController {
   @Post('complete-profile')
   async completeProfile(@Body() completeProfileRequest: { 
     token: string;
-    name: string;
-    village?: string;
-    district?: string;
-    state?: string;
-    farmSize?: number;
-    cropTypes?: string[];
+    name?: string;
+    ownerName?: string;
+    // Common fields
     language?: string;
     languagePref?: string;
     location?: string;
     gpsLat?: number;
     gpsLong?: number;
+    // Farmer specific fields
+    village?: string;
+    district?: string;
+    state?: string;
+    farmSize?: string;
+    cropTypes?: string;
+    experience?: string;
+    landOwnership?: string;
+    irrigationType?: string;
+    // Retailer specific fields
+    businessName?: string;
+    businessType?: string;
+    address?: string;
+    city?: string;
+    pincode?: string;
+    gstNumber?: string;
+    licenseNumber?: string;
+    specialization?: string;
   }) {
     const { 
       token, 
       name, 
+      ownerName,
       village, 
       district, 
       state, 
       farmSize, 
       cropTypes, 
+      experience,
+      landOwnership,
+      irrigationType,
+      businessName,
+      businessType,
+      address,
+      city,
+      pincode,
+      gstNumber,
+      licenseNumber,
+      specialization,
       language,
       languagePref,
       location,
@@ -256,8 +283,8 @@ export class AuthController {
       throw new HttpException('JWT token is required', HttpStatus.BAD_REQUEST);
     }
 
-    if (!name) {
-      throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
+    if (!name && !ownerName) {
+      throw new HttpException('Name or owner name is required', HttpStatus.BAD_REQUEST);
     }
 
     try {
@@ -268,13 +295,32 @@ export class AuthController {
       this.logger.log(`📝 Profile completion request for user: ${userId}, name: ${name}`);
       
       // Prepare profile data for database update
-       const locationString = location || `${village || ''}, ${district || ''}, ${state || ''}`.trim().replace(/^,\s*|,\s*$/g, '');
+       const locationString = location || `${village || ''}, ${district || ''}, ${state || ''}`.trim().replace(/^,\s*|,\s*$/g, '') || `${address || ''}, ${city || ''}, ${state || ''}`.trim().replace(/^,\s*|,\s*$/g, '');
        const profileData: CompleteProfileDto = {
-         name,
+         name: name || ownerName,
+         ownerName,
          languagePref: languagePref || language || 'hi-IN',
          location: locationString || undefined,
          gpsLat,
          gpsLong,
+         // Farmer fields
+         village,
+         district,
+         state,
+         farmSize,
+         cropTypes,
+         experience,
+         landOwnership,
+         irrigationType,
+         // Retailer fields
+         businessName,
+         businessType,
+         address,
+         city,
+         pincode,
+         gstNumber,
+         licenseNumber,
+         specialization,
        };
 
       // Update user profile in database
@@ -308,6 +354,41 @@ export class AuthController {
       throw new HttpException(
         error.message || 'Profile completion failed',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('user/:id')
+  async getUserById(@Param('id') userId: string) {
+    this.logger.log(`🔍 Received request to get user with ID: ${userId}`);
+    
+    try {
+      const user = await this.authService.getUserById(userId);
+      
+      if (!user) {
+        this.logger.warn(`⚠️ User not found with ID: ${userId}`);
+        throw new HttpException(
+          'User not found',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      
+      this.logger.log(`✅ User information retrieved successfully for ID: ${userId}`);
+      return {
+        success: true,
+        message: 'User information retrieved successfully',
+        data: user,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      this.logger.error(`❌ Error fetching user by ID ${userId}:`, error.message);
+      throw new HttpException(
+        'Failed to fetch user information',
+        HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
@@ -347,6 +428,36 @@ export class AuthController {
       throw new HttpException(
         error.message || 'Failed to delete all users',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Post('test-user')
+  async createTestUser(@Body() testUserData: {
+    phoneNumber: string;
+    name: string;
+    village?: string;
+    district?: string;
+    state?: string;
+    language?: string;
+  }) {
+    this.logger.log('🧪 Creating test user for form data verification');
+    
+    try {
+      const result = await this.authService.createTestUser(testUserData);
+      
+      this.logger.log('✅ Test user created successfully');
+      return {
+        success: true,
+        message: 'Test user created successfully',
+        user: result,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error('❌ Error creating test user:', error.message);
+      throw new HttpException(
+        'Failed to create test user',
+        HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }

@@ -5,11 +5,33 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { JwtService } from './jwt.service';
 
 export interface CompleteProfileDto {
+  // Common fields
   name?: string;
   languagePref?: string;
   location?: string;
   gpsLat?: number;
   gpsLong?: number;
+  
+  // Farmer-specific fields
+  village?: string;
+  district?: string;
+  state?: string;
+  farmSize?: string;
+  cropTypes?: string;
+  experience?: string;
+  landOwnership?: string; // 'OWNED' | 'LEASED' | 'SHARED'
+  irrigationType?: string; // 'RAIN_FED' | 'IRRIGATED' | 'MIXED'
+  
+  // Retailer-specific fields
+  businessName?: string;
+  ownerName?: string;
+  businessType?: string; // 'WHOLESALE' | 'RETAIL' | 'BOTH'
+  address?: string;
+  city?: string;
+  pincode?: string;
+  gstNumber?: string;
+  licenseNumber?: string;
+  specialization?: string;
 }
 
 @Injectable()
@@ -265,46 +287,101 @@ export class AuthService {
     try {
       this.logger.log(`📝 Updating profile for user: ${userId}`);
 
+      // Get user to determine role
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId }
+      });
+
+      if (!user) {
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      }
+
       // Update user name if provided
-      if (profileData.name) {
+      if (profileData.name || profileData.ownerName) {
         await this.prisma.user.update({
           where: { id: userId },
           data: { 
-            name: profileData.name,
+            name: profileData.name || profileData.ownerName,
             updatedAt: new Date()
           }
         });
       }
 
-      // Check if farmer profile exists
-      const existingProfile = await this.prisma.farmerProfile.findUnique({
-        where: { userId }
-      });
-
-      const farmerProfileData = {
-        languagePref: profileData.languagePref || 'hi-IN',
-        location: profileData.location || null,
-        gpsLat: profileData.gpsLat || null,
-        gpsLong: profileData.gpsLong || null,
-        updatedAt: new Date()
-      };
-
-      if (!existingProfile) {
-        // Create new farmer profile
-        await this.prisma.farmerProfile.create({
-          data: {
-            id: this.generateId(),
-            userId,
-            ...farmerProfileData,
-            createdAt: new Date()
-          }
+      if (user.role === 'FARMER') {
+        // Handle farmer profile
+        const existingFarmerProfile = await this.prisma.farmerProfile.findUnique({
+          where: { userId }
         });
-      } else {
-        // Update existing farmer profile
-        await this.prisma.farmerProfile.update({
-          where: { userId },
-          data: farmerProfileData
+
+        const farmerProfileData = {
+          name: profileData.name,
+          village: profileData.village,
+          district: profileData.district,
+          state: profileData.state,
+          farmSize: profileData.farmSize,
+          cropTypes: profileData.cropTypes,
+          experience: profileData.experience,
+          landOwnership: profileData.landOwnership,
+          irrigationType: profileData.irrigationType,
+          languagePref: profileData.languagePref || 'hindi',
+          location: profileData.location,
+          gpsLat: profileData.gpsLat,
+          gpsLong: profileData.gpsLong,
+          updatedAt: new Date()
+        };
+
+        if (!existingFarmerProfile) {
+          await this.prisma.farmerProfile.create({
+            data: {
+              id: this.generateId(),
+              userId,
+              ...farmerProfileData,
+              createdAt: new Date()
+            }
+          });
+        } else {
+          await this.prisma.farmerProfile.update({
+            where: { userId },
+            data: farmerProfileData
+          });
+        }
+      } else if (user.role === 'RETAILER') {
+        // Handle retailer profile
+        const existingRetailerProfile = await this.prisma.retailerProfile.findUnique({
+          where: { userId }
         });
+
+        const retailerProfileData = {
+          businessName: profileData.businessName,
+          ownerName: profileData.ownerName,
+          businessType: profileData.businessType,
+          address: profileData.address,
+          city: profileData.city,
+          state: profileData.state,
+          pincode: profileData.pincode,
+          gstNumber: profileData.gstNumber,
+          licenseNumber: profileData.licenseNumber,
+          experience: profileData.experience,
+          specialization: profileData.specialization,
+          languagePref: profileData.languagePref || 'hindi',
+          updatedAt: new Date()
+        };
+
+        if (!existingRetailerProfile) {
+          await this.prisma.retailerProfile.create({
+            data: {
+              id: this.generateId(),
+              userId,
+              ...retailerProfileData,
+              createdAt: new Date()
+            }
+          });
+        } else {
+          await this.prisma.retailerProfile.update({
+            where: { userId },
+            data: retailerProfileData
+          });
+        }
       }
 
       this.logger.log(`✅ Profile updated for user: ${userId}`);
@@ -442,6 +519,234 @@ export class AuthService {
     } catch (error) {
       this.logger.error('❌ Error deleting all users:', error);
       throw new HttpException('Failed to delete all users', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Get user information by ID (works for both farmers and retailers)
+   */
+  async getUserById(userId: string): Promise<any> {
+    this.logger.log(`🔍 Fetching user information for ID: ${userId}`);
+    
+    try {
+      // First get the user to determine role
+      const baseUser = await this.prisma.user.findUnique({
+        where: { id: userId }
+      });
+      
+      if (!baseUser) {
+        this.logger.warn(`⚠️ User not found with ID: ${userId}`);
+        return null;
+      }
+      
+      let profileData = null;
+      
+      if (baseUser.role === 'FARMER') {
+        // Fetch farmer profile with all fields
+        const result = await this.prisma.$queryRaw`
+          SELECT 
+            u.id,
+            u."phoneNumber",
+            u.name,
+            u.role,
+            u."createdAt",
+            u."updatedAt",
+            fp.id as "profileId",
+            fp.name as "farmerName",
+            fp.village,
+            fp.district,
+            fp.state,
+            fp."farmSize",
+            fp."cropTypes",
+            fp.experience,
+            fp."landOwnership",
+            fp."irrigationType",
+            fp."languagePref",
+            fp.location,
+            fp."gpsLat",
+            fp."gpsLong",
+            fp."createdAt" as "profileCreatedAt",
+            fp."updatedAt" as "profileUpdatedAt",
+            cb.id as "creditBalanceId",
+            cb.balance as "creditBalance",
+            cb.currency as "creditCurrency",
+            al.id as "lastActivityId",
+            al.action as "lastActivity",
+            al."createdAt" as "lastActivityAt"
+          FROM app_auth."User" u
+          LEFT JOIN app_auth."FarmerProfile" fp ON u.id = fp."userId"
+          LEFT JOIN app_auth."CreditBalance" cb ON u.id = cb."userId"
+          LEFT JOIN app_auth."ActivityLog" al ON u.id = al."userId"
+          WHERE u.id = ${userId}
+          ORDER BY al."createdAt" DESC
+          LIMIT 1
+        `;
+        profileData = (result as any[])[0];
+      } else if (baseUser.role === 'RETAILER') {
+        // Fetch retailer profile with all fields
+        const result = await this.prisma.$queryRaw`
+          SELECT 
+            u.id,
+            u."phoneNumber",
+            u.name,
+            u.role,
+            u."createdAt",
+            u."updatedAt",
+            rp.id as "profileId",
+            rp."businessName",
+            rp."ownerName",
+            rp."businessType",
+            rp.address,
+            rp.city,
+            rp.state,
+            rp.pincode,
+            rp."gstNumber",
+            rp."licenseNumber",
+            rp.experience,
+            rp.specialization,
+            rp."languagePref",
+            rp."createdAt" as "profileCreatedAt",
+            rp."updatedAt" as "profileUpdatedAt",
+            cb.id as "creditBalanceId",
+            cb.balance as "creditBalance",
+            cb.currency as "creditCurrency",
+            al.id as "lastActivityId",
+            al.action as "lastActivity",
+            al."createdAt" as "lastActivityAt"
+          FROM app_auth."User" u
+          LEFT JOIN app_auth."RetailerProfile" rp ON u.id = rp."userId"
+          LEFT JOIN app_auth."CreditBalance" cb ON u.id = cb."userId"
+          LEFT JOIN app_auth."ActivityLog" al ON u.id = al."userId"
+          WHERE u.id = ${userId}
+          ORDER BY al."createdAt" DESC
+          LIMIT 1
+        `;
+        profileData = (result as any[])[0];
+      } else {
+        // For users without specific role, just return basic info
+        const result = await this.prisma.$queryRaw`
+          SELECT 
+            u.id,
+            u."phoneNumber",
+            u.name,
+            u.role,
+            u."createdAt",
+            u."updatedAt",
+            cb.id as "creditBalanceId",
+            cb.balance as "creditBalance",
+            cb.currency as "creditCurrency",
+            al.id as "lastActivityId",
+            al.action as "lastActivity",
+            al."createdAt" as "lastActivityAt"
+          FROM app_auth."User" u
+          LEFT JOIN app_auth."CreditBalance" cb ON u.id = cb."userId"
+          LEFT JOIN app_auth."ActivityLog" al ON u.id = al."userId"
+          WHERE u.id = ${userId}
+          ORDER BY al."createdAt" DESC
+          LIMIT 1
+        `;
+        profileData = (result as any[])[0];
+      }
+      
+      this.logger.log(`✅ User information retrieved successfully for ID: ${userId}`);
+      return profileData;
+    } catch (error) {
+      this.logger.error(`❌ Error fetching user by ID ${userId}:`, error);
+      throw error;
+    }
+  }
+
+  async createTestUser(testUserData: {
+    phoneNumber: string;
+    name: string;
+    village?: string;
+    district?: string;
+    state?: string;
+    language?: string;
+    role?: string;
+    // Additional fields for comprehensive testing
+    farmSize?: string;
+    cropTypes?: string;
+    experience?: string;
+    landOwnership?: string;
+    irrigationType?: string;
+    businessName?: string;
+    businessType?: string;
+    address?: string;
+    city?: string;
+    pincode?: string;
+    gstNumber?: string;
+    licenseNumber?: string;
+    specialization?: string;
+  }): Promise<any> {
+    this.logger.log('🧪 Creating test user for form data verification');
+    
+    try {
+      const userRole = testUserData.role || 'FARMER';
+      
+      // Create user
+      const user = await this.prisma.user.create({
+        data: {
+          phoneNumber: testUserData.phoneNumber,
+          name: testUserData.name,
+          role: userRole
+        }
+      });
+      
+      if (userRole === 'FARMER') {
+        // Create farmer profile with comprehensive data
+        const locationString = [testUserData.village, testUserData.district, testUserData.state]
+          .filter(Boolean)
+          .join(', ');
+        
+        await this.prisma.farmerProfile.create({
+           data: {
+             userId: user.id,
+             location: locationString || testUserData.village || null,
+             district: testUserData.district || '',
+             state: testUserData.state || '',
+             farmSize: testUserData.farmSize || '1-2 acres',
+             cropTypes: testUserData.cropTypes || 'Rice, Wheat',
+             experience: testUserData.experience || '5-10 years', 
+             landOwnership: testUserData.landOwnership as 'OWNED' | 'LEASED' | 'SHARED' || 'OWNED',
+             irrigationType: testUserData.irrigationType as 'RAIN_FED' | 'IRRIGATED' | 'MIXED' || 'IRRIGATED',
+             languagePref: testUserData.language || 'hi-IN',
+           },
+         });
+      } else if (userRole === 'RETAILER') {
+        // Create retailer profile with comprehensive data
+        await this.prisma.retailerProfile.create({
+          data: {
+            userId: user.id,
+            businessName: testUserData.businessName || 'Test Agro Business',
+            ownerName: testUserData.name,
+            businessType: testUserData.businessType || 'RETAIL',
+            address: testUserData.address || 'Test Address',
+            city: testUserData.city || 'Test City',
+            state: testUserData.state || 'Test State',
+            pincode: testUserData.pincode || '123456',
+            gstNumber: testUserData.gstNumber || 'TEST123456789',
+            licenseNumber: testUserData.licenseNumber || 'LIC123456',
+            experience: testUserData.experience || '3-5 years',
+            specialization: testUserData.specialization || 'Seeds and Fertilizers',
+            languagePref: testUserData.language || 'hindi',
+          },
+        });
+      }
+      
+      // Create credit balance
+      await this.prisma.creditBalance.create({
+        data: {
+          userId: user.id,
+          balance: 0,
+        },
+      });
+      
+      this.logger.log(`✅ Test user created successfully with ID: ${user.id}`);
+      return user;
+    } catch (error) {
+      this.logger.error('❌ Error creating test user:', error);
+      throw error;
     }
   }
 }
