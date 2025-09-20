@@ -75,7 +75,7 @@ jobs:
             --memory 512Mi \
             --cpu 1 \
             --max-instances 10 \
-            --set-env-vars="FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }},FIREBASE_CLIENT_EMAIL=${{ secrets.FIREBASE_CLIENT_EMAIL }},FIREBASE_PRIVATE_KEY=${{ secrets.FIREBASE_PRIVATE_KEY }},JWT_SECRET=${{ secrets.JWT_SECRET }},DATABASE_URL=${{ secrets.DATABASE_URL }},NODE_ENV=production"
+            --set-env-vars="FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }},FIREBASE_CLIENT_EMAIL=${{ secrets.FIREBASE_CLIENT_EMAIL }},FIREBASE_PRIVATE_KEY=${{ secrets.FIREBASE_PRIVATE_KEY }},JWT_SECRET=${{ secrets.JWT_SECRET }},DATABASE_URL=postgresql://postgres.ecultefoupdrpbfrlvyj:Q%40pM%40%2AvhrBcG%21%247@aws-1-ap-southeast-1.pooler.supabase.com:5432/postgres,NODE_ENV=production"
 
       - name: Show Output
         run: |
