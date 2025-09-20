@@ -7,16 +7,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   private readonly logger = new Logger(PrismaService.name);
 
   constructor() {
-    const databaseUrl = process.env.NODE_ENV === 'production' 
-      ? 'file:/tmp/dev.db' 
-      : 'file:./dev.db';
-    
     super({
-      datasources: {
-        db: {
-          url: databaseUrl,
-        },
-      },
       log: ['query', 'info', 'warn', 'error'],
       errorFormat: 'colorless',
     });
