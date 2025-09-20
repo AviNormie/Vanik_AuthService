@@ -9,7 +9,7 @@ A NestJS-based authentication service for the Agricultural Platform, featuring F
 ## 🛠️ Tech Stack
 
 - **Framework:** NestJS
-- **Database:** SQLite (development) / PostgreSQL (production)
+- **Database:** PostgreSQL
 - **Authentication:** Firebase Auth + JWT
 - **Deployment:** Google Cloud Run
 - **CI/CD:** GitHub Actions
