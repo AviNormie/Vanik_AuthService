@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["app_auth"]
 }
 
 model User {
@@ -14,6 +15,8 @@ model User {
   role        String   @default("FARMER")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@schema("app_auth")
 }
 
 model CreditBalance {
@@ -21,6 +24,8 @@ model CreditBalance {
   userId   String @unique
   balance  Int    @default(0)
   currency String @default("CREDITS")
+
+  @@schema("app_auth")
 }
 
 model ActivityLog {
@@ -29,6 +34,8 @@ model ActivityLog {
   action    String
   metadata  Json?
   createdAt DateTime @default(now())
+
+  @@schema("app_auth")
 }
 
 model FarmerProfile {
@@ -40,6 +47,8 @@ model FarmerProfile {
   gpsLong      Float?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  @@schema("app_auth")
 }
 
 model OTPStore {
@@ -48,4 +57,6 @@ model OTPStore {
   otp         String
   expiresAt   DateTime
   createdAt   DateTime @default(now())
+
+  @@schema("app_auth")
 }
